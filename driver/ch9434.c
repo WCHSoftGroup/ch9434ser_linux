@@ -14,6 +14,7 @@
  * V1.0 - initial version
  * V1.1 - change RS485 setting and getting method, add procfs for dump registers
  *      - add support for CH9434A with continuous spi transmission
+ * V1.2 - add support for kernel version beyond 5.12.18
  */
 
 #define DEBUG
@@ -43,7 +44,7 @@
 
 #define DRIVER_AUTHOR "WCH"
 #define DRIVER_DESC   "SPI serial driver for ch9434."
-#define VERSION_DESC  "V1.1 On 2023.04"
+#define VERSION_DESC  "V1.2 On 2023.10"
 
 #ifndef PORT_SC16IS7XX
 #define PORT_SC16IS7XX 128
@@ -249,12 +250,20 @@ static u8 ch943x_port_read(struct uart_port *port, u8 reg)
 		{
 			.tx_buf = &cmd,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 		{
 			.rx_buf = &val,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 	};
 
@@ -283,12 +292,20 @@ static u8 ch943x_port_read_specify(struct uart_port *port, u8 portnum, u8 reg)
 		{
 			.tx_buf = &cmd,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 		{
 			.rx_buf = &val,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 	};
 
@@ -323,12 +340,20 @@ void ch943x_port_write(struct uart_port *port, u8 reg, u8 val)
 		{
 			.tx_buf = &cmd,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 		{
 			.tx_buf = &val,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 	};
 
@@ -365,12 +390,20 @@ static void ch943x_port_write_spefify(struct uart_port *port, u8 portnum, u8 reg
 		{
 			.tx_buf = &cmd,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 		{
 			.tx_buf = &val,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 	};
 
@@ -400,12 +433,20 @@ static int ch943x_port_read_multi(struct uart_port *port, u8 portnum, u8 reg, u8
 		{
 			.tx_buf = &cmd,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 		{
 			.rx_buf = buf,
 			.len = 4,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 	};
 
@@ -454,7 +495,11 @@ void ch943x_raw_write(struct uart_port *port, const void *reg, unsigned char *bu
 		{
 			.tx_buf = reg,
 			.len = 1,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			.delay.value = CH943X_CMD_DELAY,
+#else
 			.delay_usecs = CH943X_CMD_DELAY,
+#endif
 		},
 	};
 
@@ -477,7 +522,11 @@ void ch943x_raw_write(struct uart_port *port, const void *reg, unsigned char *bu
 		while (len--) {
 			t[1].tx_buf = buf + writesum;
 			t[1].len = 1;
-			t[1].delay_usecs = CH943X_CMD_DELAY;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 19))
+			t[1].delay.value = CH943X_CMD_DELAY,
+#else
+			t[1].delay_usecs = CH943X_CMD_DELAY,
+#endif
 			mutex_lock(&s->mutex_bus_access);
 			spi_message_init(&m);
 			spi_message_add_tail(&t[0], &m);
@@ -972,7 +1021,11 @@ static void ch943x_break_ctl(struct uart_port *port, int break_state)
 	ch943x_port_update(port, CH943X_LCR_REG, CH943X_LCR_TXBREAK_BIT, break_state ? CH943X_LCR_TXBREAK_BIT : 0);
 }
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
+static void ch943x_set_termios(struct uart_port *port, struct ktermios *termios, const struct ktermios *old)
+#else
 static void ch943x_set_termios(struct uart_port *port, struct ktermios *termios, struct ktermios *old)
+#endif
 {
 	struct ch943x_port *s = dev_get_drvdata(port->dev);
 	struct ch943x_one *one = to_ch943x_one(port, port);
@@ -1509,9 +1562,17 @@ out:
 	return ret;
 }
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0))
+static void ch943x_spi_remove(struct spi_device *spi)
+#else
 static int ch943x_spi_remove(struct spi_device *spi)
+#endif
 {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0))
+	ch943x_remove(&spi->dev);
+#else
 	return ch943x_remove(&spi->dev);
+#endif
 }
 
 static struct spi_driver ch943x_spi_uart_driver = {
