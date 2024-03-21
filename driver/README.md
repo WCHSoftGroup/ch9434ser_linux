@@ -15,7 +15,8 @@ from other driver then modify it.
 
 3. Run the make menuconfig and select the ch9434 serial support at "modules" item.
 
-4. Define the spi structure on your dts file similar the follow: 
+4. Define the spi structure on your dts file similar the follow:
+``` 
 	spidev@1 {
 		#address-cells = <1>;
 		#size-cells = <1>;
@@ -25,8 +26,9 @@ from other driver then modify it.
 		interrupt-parent = <&gpio0>;
 		interrupts = <0 2>;
 	}
-	Notice that the irq request method cannot be supported in this way in some platforms.
-	You should modify it in ch9434.c in method ch943x_spi_probe.
+```
+Notice that the irq request method cannot be supported in this way in some platforms.
+You should modify it in ch9434.c in method ch943x_spi_probe.
 
 Integrated into your system method2
 ---------------------------------------
@@ -46,6 +48,7 @@ obj-$(CONFIG_SERIAL_CH943X) += ch9434.o
 4. Run the make menuconfig and select the ch9434 serial support at the driver/tty/serial and save the config.
 
 5. Define the spi0_board_info object on your board file similar the follow:
+``` 
 static struct spi_board_info spi0_board_info[] __initdata = {
 	{
 		.modalias = "ch943x_spi",
@@ -58,6 +61,7 @@ static struct spi_board_info spi0_board_info[] __initdata = {
 		.irq = IRQ_EINT(25),
 	}
 };
+```
 
 
 * if you need change the default uart clock, you can modify it at about line:1288 in function ch943x_probe.
