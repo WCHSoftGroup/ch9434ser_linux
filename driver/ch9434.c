@@ -1,7 +1,7 @@
 /*
  * SPI serial driver for USB to Quad UARTs chip ch9434.
  *
- * Copyright (C) 2023 Nanjing Qinheng Microelectronics Co., Ltd.
+ * Copyright (C) 2024 Nanjing Qinheng Microelectronics Co., Ltd.
  * Web:      http://wch.cn
  * Author:   WCH <tech@wch.cn>
  *
@@ -15,6 +15,7 @@
  * V1.1 - change RS485 setting and getting method, add procfs for dump registers
  *      - add support for CH9434A with continuous spi transmission
  * V1.2 - add support for kernel version beyond 5.12.18
+ * V1.3 - improve spi transfer compatibility on some platforms
  */
 
 #define DEBUG
@@ -44,7 +45,7 @@
 
 #define DRIVER_AUTHOR "WCH"
 #define DRIVER_DESC   "SPI serial driver for ch9434."
-#define VERSION_DESC  "V1.2 On 2023.10"
+#define VERSION_DESC  "V1.3 On 2024.09"
 
 #ifndef PORT_SC16IS7XX
 #define PORT_SC16IS7XX 128
@@ -218,6 +219,8 @@ struct ch943x_one {
 	unsigned char ier;
 	unsigned char mcr_force;
 	bool isopen;
+	unsigned char *txbuf;
+	unsigned char *rxbuf;
 };
 
 struct ch943x_port {
@@ -478,19 +481,12 @@ static void ch943x_port_update(struct uart_port *port, u8 reg, u8 mask, u8 val)
 void ch943x_raw_write(struct uart_port *port, const void *reg, unsigned char *buf, int len)
 {
 	struct ch943x_port *s = dev_get_drvdata(port->dev);
+	struct ch943x_one *one = to_ch943x_one(port, port);
 	ssize_t status;
 	struct spi_message m;
 	int writesum = 0;
 	int i;
-	u8 *txbuf;
-	txbuf = kmalloc(2048, GFP_KERNEL);
-	if (!txbuf)
-		return;
 
-	struct spi_transfer x = {
-		.tx_buf = txbuf,
-		.len = len + 1,
-	};
 	struct spi_transfer t[2] = {
 		{
 			.tx_buf = reg,
@@ -503,9 +499,14 @@ void ch943x_raw_write(struct uart_port *port, const void *reg, unsigned char *bu
 		},
 	};
 
+	struct spi_transfer x = {
+		.tx_buf = one->txbuf,
+		.len = len + 1,
+	};
+
 	if (s->spi_contmode) {
-		txbuf[0] = *(u8 *)reg;
-		memcpy(txbuf + 1, buf, len);
+		one->txbuf[0] = *(u8 *)reg;
+		memcpy(one->txbuf + 1, buf, len);
 		mutex_lock(&s->mutex_bus_access);
 		spi_message_init(&m);
 		spi_message_add_tail(&x, &m);
@@ -543,28 +544,23 @@ void ch943x_raw_write(struct uart_port *port, const void *reg, unsigned char *bu
 			writesum++;
 		}
 	}
-	kfree(txbuf);
 }
 
 static void ch943x_raw_read(struct uart_port *port, u8 reg, unsigned char *buf, int len)
 {
 	struct ch943x_port *s = dev_get_drvdata(port->dev);
+	struct ch943x_one *one = to_ch943x_one(port, port);
 	u8 cmd = (0x00 | reg) + (port->line * 0x10);
 	ssize_t status;
 	struct spi_message m;
-	u8 *rxbuf;
-
-	rxbuf = (u8 *)kmalloc(4096, GFP_KERNEL);
-	if (!rxbuf)
-		return;
 
 	struct spi_transfer x = {
-		.rx_buf = rxbuf,
-		.tx_buf = rxbuf,
+		.rx_buf = one->rxbuf,
+		.tx_buf = one->rxbuf,
+		.len = len + 2,
 	};
 
-	rxbuf[0] = cmd;
-	x.len = len + 2;
+	one->rxbuf[0] = cmd;
 	mutex_lock(&s->mutex_bus_access);
 	spi_message_init(&m);
 	spi_message_add_tail(&x, &m);
@@ -573,9 +569,8 @@ static void ch943x_raw_read(struct uart_port *port, u8 reg, unsigned char *buf, 
 	if (status < 0) {
 		dev_err(&s->spi_dev->dev, "Failed to %s Err_code %ld\n", __func__, (unsigned long)status);
 	} else {
-		memcpy(buf, rxbuf + 2, len);
+		memcpy(buf, one->rxbuf + 2, len);
 	}
-	kfree(rxbuf);
 }
 
 #endif
@@ -643,7 +638,6 @@ static int ch943x_scr_test(struct uart_port *port)
 {
 	struct ch943x_port *s = dev_get_drvdata(port->dev);
 	u8 val;
-	u8 i;
 
 	dev_vdbg(&s->spi_dev->dev, "******Uart %d SPR Test Start******\n", port->line);
 
@@ -1213,6 +1207,19 @@ static int ch943x_startup(struct uart_port *port)
 
 	dev_dbg(&s->spi_dev->dev, "%s\n", __func__);
 
+	/* kmalloc spi transfer buffer when startup */
+	one->rxbuf = kmalloc(2048, GFP_KERNEL);
+	if (!one->rxbuf) {
+		dev_err(&s->spi_dev->dev, "kmalloc rxbuf failed\n");
+		return -1;
+	}
+
+	one->txbuf = kmalloc(2048, GFP_KERNEL);
+	if (!one->txbuf) {
+		dev_err(&s->spi_dev->dev, "kmalloc txbuf failed\n");
+		return -1;
+	}
+
 	/* Reset FIFOs and configure RX-FIFO levels to 8 */
 	ch943x_port_write(port, CH943X_FCR_REG,
 			  CH943X_FCR_RXRESET_BIT | CH943X_FCR_TXRESET_BIT | CH943X_FCR_RXLVLH_BIT |
@@ -1244,6 +1251,11 @@ static void ch943x_shutdown(struct uart_port *port)
 	/* Disable all interrupts */
 	ch943x_port_write(port, CH943X_IER_REG, 0);
 	ch943x_port_write(port, CH943X_MCR_REG, 0);
+
+	if (one->rxbuf)
+		kfree(one->rxbuf);
+	if (one->txbuf)
+		kfree(one->txbuf);
 	one->mcr_force = 0;
 	one->isopen = false;
 }
@@ -1373,11 +1385,12 @@ static int ch943x_probe(struct spi_device *spi, struct ch943x_devtype *devtype, 
 		INIT_WORK(&s->p[i].stop_rx_work, ch943x_stop_rx_work_proc);
 		INIT_WORK(&s->p[i].stop_tx_work, ch943x_stop_tx_work_proc);
 
-		/* Register port */
-		uart_add_one_port(&s->uart, &s->p[i].port);
 		ret = ch943x_scr_test(&s->p[i].port);
 		if (ret)
 			goto out;
+
+		/* Register port */
+		uart_add_one_port(&s->uart, &s->p[i].port);
 	}
 
 	ret = ch943x_port_read_multi(&s->p[0].port, 0, CH943X_CHIP_VER_REG, s->ver, 4);
@@ -1407,9 +1420,8 @@ static int ch943x_probe(struct spi_device *spi, struct ch943x_devtype *devtype, 
 	/* Init UART Clock */
 	ch943x_port_write(&s->p[0].port, CH943X_CLK_REG, CH943X_CLK_EXT_BIT | CH943X_CLK_PLL_BIT | clkdiv);
 
-	ret = devm_request_threaded_irq(dev, irq, ch943x_ist_top, ch943x_ist,
-					//					IRQF_ONESHOT | flags, dev_name(dev), s);
-					flags, dev_name(dev), s);
+	ret = devm_request_threaded_irq(dev, irq, ch943x_ist_top, ch943x_ist, IRQF_ONESHOT | flags, dev_name(dev), s);
+	// flags, dev_name(dev), s);
 	mdelay(200);
 	dev_dbg(dev, "%s - devm_request_threaded_irq =%d result:%d\n", __func__, irq, ret);
 	g_ch943x_port = s;
@@ -1428,7 +1440,7 @@ out_clk:
 
 	return ret;
 }
-
+static struct attribute_group ch9434_attribute_group;
 static int ch943x_remove(struct device *dev)
 {
 	struct ch943x_port *s = dev_get_drvdata(dev);
@@ -1451,6 +1463,8 @@ static int ch943x_remove(struct device *dev)
 	uart_unregister_driver(&s->uart);
 	if (!IS_ERR(s->clk))
 		/*clk_disable_unprepare(s->clk)*/;
+
+	sysfs_remove_group(&dev->kobj, &ch9434_attribute_group);
 
 	return 0;
 }
@@ -1501,12 +1515,6 @@ int ch9434_create_sysfs(struct spi_device *spi)
 		return -EIO;
 	}
 
-	err = sysfs_create_link(NULL, &spi->dev.kobj, "ch9434");
-	if (err < 0) {
-		dev_err(&spi->dev, "Failed to create link!");
-		return -EIO;
-	}
-
 	dev_info(&spi->dev, "sysfs_create_group() succeeded!!");
 
 	return err;
@@ -1516,7 +1524,7 @@ int ch9434_create_sysfs(struct spi_device *spi)
 static int ch943x_spi_probe(struct spi_device *spi)
 {
 	struct ch943x_devtype *devtype = &ch943x_devtype;
-	unsigned long flags = IRQF_TRIGGER_FALLING;
+	unsigned long flags = IRQF_TRIGGER_LOW;
 	int ret;
 	u32 save;
 
