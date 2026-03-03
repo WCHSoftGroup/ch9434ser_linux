@@ -904,7 +904,7 @@ int ch943x_register_uart_port(struct ch943x *s)
             if (s->chip.chiptype == CHIP_CH9434D) {
                 if (i == 3 && CH943X_EXCLK_ENABLE)
                     continue;
-                if ((i == 0 || i == 1) && CH9434D_CAN_ENABLE)
+                if ((i == 0 || i == 1) && s->can_on)
                     continue;
             }
 #endif

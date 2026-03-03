@@ -551,7 +551,6 @@ int ch943x_reg_read(struct ch943x *s, u8 _cmd, u32 n_rx, void *rxbuf)
     return ret;
 }
 
-#ifdef CH9434D_CAN_ON
 #ifndef CH943X_CANREG_NOTIMEINTER
 static int ch943x_transfer_read_can(struct ch943x *s, u8 _cmd, u8 _reg, u32 n_rx, void *rxbuf)
 {
@@ -1002,7 +1001,6 @@ int ch943x_txmailbox_write(struct ch943x *s, u8 reg, u32 n_tx, const void *txbuf
 #endif
     return 0;
 }
-#endif
 
 u8 ch943x_port_read(struct uart_port *port, u8 reg)
 {
@@ -1445,9 +1443,10 @@ int ch943x_io_enable(struct ch943x *s)
     if (CH943X_EXCLK_ENABLE) {
         s->extern_clock_on = true;
     }
-    if (CH9434D_CAN_ENABLE) {
+#ifdef CH9434D_CAN_ON
+    if (s->chip.chiptype == CHIP_CH9434D)
         s->can_on = true;
-    }
+#endif
 #endif
 
     /*
@@ -1664,7 +1663,7 @@ int __ch943x_io_ioctl(struct ch943x *s, unsigned int cmd, unsigned long arg)
         if ((gpionumber == 3) && CH943X_EXCLK_ENABLE) {
             dev_err(s->dev, "%s - CH9434D GPIO3 is unavailable.\n", __func__);
             return -1;
-        } else if (((gpionumber == 0) || (gpionumber == 1)) && CH9434D_CAN_ENABLE) {
+        } else if (((gpionumber == 0) || (gpionumber == 1)) && s->can_on) {
             dev_err(s->dev, "%s - CH9434D GPIO0/1 is unavailable.\n", __func__);
             return -1;
         }
@@ -2058,7 +2057,7 @@ static ssize_t ch943x_proc_read(struct file *file, char __user *user_buf, size_t
     }
 
 #ifdef CH9434D_CAN_ON
-    if (s->chip.chiptype == CHIP_CH9434D) {
+    if (s->can_on && (s->chip.chiptype == CHIP_CH9434D)) {
         for (i = 0x00; i < 0x45; i++) {
             reg_val = ch943x_canreg_read(s, i);
             len += snprintf(buf + len, REGS_BUFSIZE - len, "reg:0x%02x val:0x%08x\n", i, reg_val);

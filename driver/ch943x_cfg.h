@@ -32,7 +32,6 @@
  * the MULTI_CHIP_MODE macro needs to be defined.
  * However, if using a single chip, there is no need to define it.
  */
-
 #ifndef MULTI_CHIP_MODE
 
 #ifdef USE_SERIAL_MODE
@@ -65,9 +64,9 @@
 // #define CH943X_TNOW6_ON
 // #define CH943X_TNOW7_ON
 
+#endif /* MULTI_CHIP_MODE */
+
 /**
  * Define the CH9434D_CAN_ON macro and declare whether to use the CAN interface
  */
-#define CH9434D_CAN_ON
-
-#endif /* MULTI_CHIP_MODE */
+// #define CH9434D_CAN_ON

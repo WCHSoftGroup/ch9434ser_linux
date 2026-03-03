@@ -2,6 +2,7 @@
 
 #define TX_MAILBOX_NR 3
 
+#ifdef CH9434D_CAN_ON
 struct rx_mailbox_info {
     u32 rxmdh; /* high byte of the receiving email address */
     u32 rxmdl; /* low byte of the receiving email address */
@@ -868,3 +869,4 @@ void ch943x_can_irq(struct ch943x *s)
         ch943x_can_err(s, fifo0_state, fifo1_state, err_state);
     }
 }
+#endif

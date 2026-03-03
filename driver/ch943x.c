@@ -129,19 +129,14 @@ irqreturn_t ch943x_ist(int irq, void *dev_id)
         }
     }
 
-#ifdef MULTI_CHIP_MODE
+#ifdef CH9434D_CAN_ON
     if ((s->chip.chiptype == CHIP_CH9434D) && s->can_on) {
         if (atomic_read(&s->priv->can_isopen) == 1) {
             ch943x_can_irq(s);
         }
     }
-#else
-    if ((s->chip.chiptype == CHIP_CH9434D) && CH9434D_CAN_ENABLE) {
-        if (atomic_read(&s->priv->can_isopen) == 1) {
-            ch943x_can_irq(s);
-        }
-    }
-#endif /* MULTI_CHIP_MODE */
+#endif
+
     DRV_DEBUG(s->dev, "%s end\n", __func__);
 
     return IRQ_HANDLED;
@@ -385,7 +380,7 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
         goto out2;
     }
 
-#ifdef MULTI_CHIP_MODE
+#ifdef CH9434D_CAN_ON
     if ((s->chip.chiptype == CHIP_CH9434D) && s->can_on) {
         ret = ch943x_can_register(s);
         if (ret < 0) {
@@ -393,15 +388,7 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
             goto out3;
         }
     }
-#else
-    if ((s->chip.chiptype == CHIP_CH9434D) && CH9434D_CAN_ENABLE) {
-        ret = ch943x_can_register(s);
-        if (ret < 0) {
-            dev_err(dev, "ch943x register can Failed.\n");
-            goto out3;
-        }
-    }
-#endif /* MULTI_CHIP_MODE */
+#endif
 
     ret = devm_request_threaded_irq(dev, irq, ch943x_ist_top, ch943x_ist, IRQF_ONESHOT | flags, dev_name(dev), s);
     if (ret != 0) {
@@ -422,16 +409,12 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
     return 0;
 
 out4:
-#ifdef MULTI_CHIP_MODE
+#ifdef CH9434D_CAN_ON
     if ((s->chip.chiptype == CHIP_CH9434D) && s->can_on) {
         ch943x_can_remove(s);
     }
-#else
-    if ((s->chip.chiptype == CHIP_CH9434D) && CH9434D_CAN_ENABLE) {
-        ch943x_can_remove(s);
-    }
-#endif
 out3:
+#endif
     for (i = 0; i < s->uart.nr; i++) {
         if (s->chip.chiptype == CHIP_CH9437 && IS_USE_SERIAL_MODE && i == 0)
             continue;
@@ -463,15 +446,11 @@ static int ch943x_remove(struct device *dev)
     devm_free_irq(dev, s->irq, s);
 
     ch943x_uart_remove(s);
-#ifdef MULTI_CHIP_MODE
+#ifdef CH9434D_CAN_ON
     if ((s->chip.chiptype == CHIP_CH9434D) && s->can_on) {
         ch943x_can_remove(s);
     }
-#else
-    if ((s->chip.chiptype == CHIP_CH9434D) && CH9434D_CAN_ENABLE) {
-        ch943x_can_remove(s);
-    }
-#endif /* MULTI_CHIP_MODE */
+#endif
 
 #ifdef USE_SERIAL_MODE
     if (s->chip.chiptype == CHIP_CH9437 && IS_USE_SERIAL_MODE)
@@ -730,24 +709,22 @@ static struct dev_pm_ops ch943x_pm_ops = {
 #ifdef USE_SPI_MODE
 static struct spi_driver ch943x_spi_driver = {
 #ifdef USE_CHIP_CH432
-    .driver =
-        {
-                 .name = CH43X_NAME_SPI,
-                 .bus = &spi_bus_type,
-                 .owner = THIS_MODULE,
-                 .of_match_table = of_match_ptr(ch43x_dt_ids),
-                 },
+    .driver = {
+        .name = "ch943x",
+        .bus = &spi_bus_type,
+        .owner = THIS_MODULE,
+        .of_match_table = of_match_ptr(ch43x_dt_ids),
+    },
     .probe = ch43x_spi_probe,
     .remove = ch43x_spi_remove,
 #else
-    .driver =
-        {
-            .name = CH943X_NAME_SPI,
-            .bus = &spi_bus_type,
-            .owner = THIS_MODULE,
-            .of_match_table = of_match_ptr(ch943x_dt_ids),
-            .pm = &ch943x_pm_ops,
-        },
+    .driver = {
+        .name = CH943X_NAME_SPI,
+        .bus = &spi_bus_type,
+        .owner = THIS_MODULE,
+        .of_match_table = of_match_ptr(ch943x_dt_ids),
+        .pm = &ch943x_pm_ops,
+    },
     .probe = ch943x_spi_probe,
     .remove = ch943x_spi_remove,
 #endif
@@ -755,26 +732,24 @@ static struct spi_driver ch943x_spi_driver = {
 MODULE_ALIAS("spi:ch943x");
 #elif defined(USE_I2C_MODE)
 static struct i2c_driver ch943x_i2c_driver = {
-    .driver =
-        {
-                 .name = "ch943x",
-                 .owner = THIS_MODULE,
-                 .of_match_table = of_match_ptr(ch943x_dt_ids),
-                 .pm = &ch943x_pm_ops,
-                 },
+    .driver = {
+        .name = "ch943x",
+        .owner = THIS_MODULE,
+        .of_match_table = of_match_ptr(ch943x_dt_ids),
+        .pm = &ch943x_pm_ops,
+    },
     .probe = ch943x_i2c_probe,
     .remove = ch943x_i2c_remove,
 };
 MODULE_ALIAS("i2c:ch943x");
 #elif defined(USE_SERIAL_MODE)
 static struct platform_driver ch943x_platform_driver = {
-    .driver =
-        {
-                 .name = "ch943x",
-                 .owner = THIS_MODULE,
-                 .of_match_table = of_match_ptr(ch943x_dt_ids),
-                 .pm = &ch943x_pm_ops,
-                 },
+    .driver = {
+        .name = "ch943x",
+        .owner = THIS_MODULE,
+        .of_match_table = of_match_ptr(ch943x_dt_ids),
+        .pm = &ch943x_pm_ops,
+    },
     .probe = ch943x_platform_probe,
     .remove = ch943x_platform_remove,
 };
