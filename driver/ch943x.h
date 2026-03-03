@@ -46,7 +46,7 @@
 
 #define DRIVER_AUTHOR   "WCH"
 #define DRIVER_DESC     "SPI/I2C/UART to SERIAL/CAN/GPIO driver for CH9434/CH9438/CH9437/CH9432, etc"
-#define VERSION_DESC    "V1.5 On 2026.02"
+#define VERSION_DESC    "V1.5 On 2026.03"
 #define CH943X_NAME_SPI "ch943x_spi"
 #define CH943X_NAME_I2C "ch943x_i2c"
 
@@ -281,12 +281,6 @@ static const int ch943x_tnow_enable[] = {
 #define IS_USE_SPI_MODE 1
 #else
 #define IS_USE_SPI_MODE 0
-#endif
-
-#if defined(CH9434D_CAN_ON)
-#define CH9434D_CAN_ENABLE 1
-#else
-#define CH9434D_CAN_ENABLE 0
 #endif
 
 #if defined(EXTERN_CLOCK)
