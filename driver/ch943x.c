@@ -19,6 +19,8 @@
  * V1.3 - improve spi transfer compatibility on some platforms
  * V1.4 - add support for CH9434D
  * V1.5 - add support for CH9438F/CH9437F/CH9432F
+ * V1.6 - fix uart fcr register bugs
+ *        modify uart driver's log output format
  */
 
 #include "ch943x.h"
@@ -88,11 +90,6 @@ static int ch943x_io_open(struct inode *inode, struct file *fp)
 
 static int ch943x_io_release(struct inode *inode, struct file *fp)
 {
-    unsigned int minor = iminor(inode);
-    struct ch943x *s = ch943x_get_by_index(minor);
-
-    DRV_DEBUG(s->dev, "%s\n", __func__);
-
     return 0;
 }
 
@@ -115,17 +112,21 @@ irqreturn_t ch943x_ist(int irq, void *dev_id)
 
     DRV_DEBUG(s->dev, "%s interrupt enter...\n", __func__);
 
-    if ((s->chip.chiptype == CHIP_CH9438) || ((s->chip.chiptype == CHIP_CH9437) && IS_USE_SERIAL_MODE) ||
+    if ((s->chip.chiptype == CHIP_CH9438F) || ((s->chip.chiptype == CHIP_CH9437F) && IS_USE_SERIAL_MODE) ||
         ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_SPI_MODE) ||
-        ((s->chip.chiptype == CHIP_CH9432) && IS_USE_SPI_MODE)) {
+        ((s->chip.chiptype == CHIP_CH9432D) && IS_USE_SPI_MODE)) {
         ch943x_port_irq_bulkmode(s);
-    } else if ((s->chip.chiptype == CHIP_CH9434A) || (s->chip.chiptype == CHIP_CH9434M) ||
-               ((s->chip.chiptype == CHIP_CH9437) && IS_USE_I2C_MODE) ||
-               ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_I2C_MODE) ||
-               ((s->chip.chiptype == CHIP_CH9432) && IS_USE_I2C_MODE)) {
+    } else if ((s->chip.chiptype == CHIP_CH9434A) || (s->chip.chiptype == CHIP_CH9434M)) {
         for (i = 0; i < s->uart.nr; ++i) {
-            if (atomic_read(&s->p[i].isopen) == 1)
+            if (atomic_read(&s->p[i].isopen) == 1) {
                 ch943x_port_irq(s, i);
+            }
+        }
+    } else if (((s->chip.chiptype == CHIP_CH9437F) && IS_USE_I2C_MODE) ||
+               ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_I2C_MODE) ||
+               ((s->chip.chiptype == CHIP_CH9432D) && IS_USE_I2C_MODE)) {
+        for (i = 0; i < s->uart.nr; ++i) {
+            ch943x_port_irq(s, i);
         }
     }
 
@@ -149,9 +150,9 @@ static int ch943x_clock_init(struct ch943x *s)
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
-    if (s->chip.chiptype == CHIP_CH9434D || s->chip.chiptype == CHIP_CH9432 || s->chip.chiptype == CHIP_CH9438 ||
-        s->chip.chiptype == CHIP_CH9437) {
-        if (CH943X_EXCLK_ENABLE) {
+    if (s->chip.chiptype == CHIP_CH9434D || s->chip.chiptype == CHIP_CH9432D || s->chip.chiptype == CHIP_CH9438F ||
+        s->chip.chiptype == CHIP_CH9437F) {
+        if (s->extern_clock_on) {
             data = 0x03 << 6;
             ret = ch943x_reg_write(s, CH943X_CLK_REG | CH943X_REG_OP_WRITE, 1, &data);
             if (ret < 0)
@@ -335,13 +336,13 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
         dev_err(dev, "ch943x get chip version Failed.\n");
         goto out1;
     }
-    if (s->chip.chiptype == CHIP_CH9438) {
+    if (s->chip.chiptype == CHIP_CH9438F) {
         s->chip.nr_uart = 8;
         s->chip.nr_gpio = 8;
-    } else if (s->chip.chiptype == CHIP_CH9437) {
+    } else if (s->chip.chiptype == CHIP_CH9437F) {
         s->chip.nr_uart = 8;
         s->chip.nr_gpio = 11;
-    } else if (s->chip.chiptype == CHIP_CH9432) {
+    } else if (s->chip.chiptype == CHIP_CH9432D) {
         s->chip.nr_uart = 2;
         s->chip.nr_gpio = 8;
     } else if (s->chip.chiptype == CHIP_CH9434D) {
@@ -395,7 +396,7 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
         dev_err(dev, "irq %d request failed, error %d\n", irq, ret);
         goto out4;
     }
-    DRV_DEBUG(dev, "%s - devm_request_threaded_irq =%d result:%d\n", __func__, irq, ret);
+    DRV_DEBUG(dev, "%s - request irq:%d result:%d\n", __func__, irq, ret);
 
     class_dev = device_create(ch943x_io_class, s->dev, MKDEV(MAJOR(devt), s->minor), s, "ch943x_iodev%d", s->minor);
     if (IS_ERR(class_dev)) {
@@ -416,7 +417,7 @@ out4:
 out3:
 #endif
     for (i = 0; i < s->uart.nr; i++) {
-        if (s->chip.chiptype == CHIP_CH9437 && IS_USE_SERIAL_MODE && i == 0)
+        if (s->chip.chiptype == CHIP_CH9437F && IS_USE_SERIAL_MODE && i == 0)
             continue;
         p = s->p + i;
         cancel_work_sync(&p->tx_work);
@@ -453,7 +454,7 @@ static int ch943x_remove(struct device *dev)
 #endif
 
 #ifdef USE_SERIAL_MODE
-    if (s->chip.chiptype == CHIP_CH9437 && IS_USE_SERIAL_MODE)
+    if (s->chip.chiptype == CHIP_CH9437F && IS_USE_SERIAL_MODE)
         filp_close(s->fp, NULL);
 #endif
     mutex_destroy(&s->mutex);
@@ -469,8 +470,8 @@ static int ch943x_remove(struct device *dev)
 
 static const struct of_device_id __maybe_unused ch943x_dt_ids[] = {
     {
-     .compatible = "wch,ch943x",
-     },
+        .compatible = "wch,ch943x",
+    },
     {},
 };
 MODULE_DEVICE_TABLE(of, ch943x_dt_ids);
@@ -719,7 +720,7 @@ static struct spi_driver ch943x_spi_driver = {
     .remove = ch43x_spi_remove,
 #else
     .driver = {
-        .name = CH943X_NAME_SPI,
+        .name = "ch943x",
         .bus = &spi_bus_type,
         .owner = THIS_MODULE,
         .of_match_table = of_match_ptr(ch943x_dt_ids),

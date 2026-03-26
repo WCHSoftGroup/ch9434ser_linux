@@ -90,7 +90,6 @@
 #define CH943X_REG_OP_WRITE 0x80
 #define CH943X_REG_OP_READ  0x00
 
-/***********************************************************************/
 #define CH943X_IO_MULTI_W_EN  0x01
 #define CH943X_IO_MULTI_R_EN  0x81
 #define CH943X_IO_DEF_W_EN    0x03
@@ -415,13 +414,33 @@ static const int ch943x_tnow_enable[] = {
 #define CH943X_FIFO_SIZE (1536)
 #define CH943X_CMD_DELAY 3
 
+#ifdef CH9434D_CAN_ON
 /* -----------------------------------------------------------------------------
  *                         CH9434D CAN Related
  * -----------------------------------------------------------------------------
  */
+#ifdef USE_SPI_MODE
 #define CAN_TX_CONTMODE
 #define CAN_RX_CONTMODE
-// #define CH943X_CANREG_NOTIMEINTER
+#endif
+#ifdef CH943X_CANREG_NOTIMEINTER
+#define SPI_W_CAN_DELAY1_US 3
+
+#define SPI_W_CAN_ADD_SYNC_CODE  0x22
+#define SPI_W_CAN_ADD_INCP_CODE  0x24
+#define SPI_W_CAN_DEAL_SYNC_CODE 0x28
+#define SPI_W_CAN_DEAL_INCP_CODE 0x30
+
+#define SPI_R_CAN_ADD_SYNC_CODE  0x22
+#define SPI_R_CAN_ADD_INCP_CODE  0x24
+#define SPI_R_CAN_DATA_SYNC_CODE 0x28
+#define SPI_R_CAN_DATA_INCP_CODE 0x30
+
+#define W_WAIT_CAN_ADD_SYNC_CODE 0x42
+#define W_RSP_CAN_DATA_INCP_CODE 0x44
+#define R_WAIT_CAN_ADD_SYNC_CODE 0x42
+#define R_RSP_CAN_DATA_INCP_CODE 0x44
+#endif 
 
 #define CH943X_CANREG_CMD             0x46
 #define CH943X_CANREG_CMD_NOTIMEINTER 0x47
@@ -648,6 +667,7 @@ static const int ch943x_tnow_enable[] = {
 #define CAN_TxStatus_Ok        ((u8)0x01) /* CAN transmission succeeded */
 #define CAN_TxStatus_Pending   ((u8)0x02) /* CAN transmission pending */
 #define CAN_TxStatus_NoMailBox ((u8)0x04) /* CAN cell did not provide an empty mailbox */
+#endif
 
 /* -----------------------------------------------------------------------------
  *                         CH943X GPIO register definitions
@@ -692,9 +712,9 @@ enum CHIPTYPE {
     CHIP_CH9434A = 0,
     CHIP_CH9434D,
     CHIP_CH9434M,
-    CHIP_CH9438,
-    CHIP_CH9437,
-    CHIP_CH9432,
+    CHIP_CH9438F,
+    CHIP_CH9437F,
+    CHIP_CH9432D,
 };
 
 enum INTERFACE_MODE {
@@ -714,32 +734,19 @@ struct ch943x_chip_info {
     char chip_name[16];
 };
 
+#ifdef CH9434D_CAN_ON
 struct ch943x_can_priv {
     struct can_priv can;
     struct net_device *ndev;
     struct spi_device *spi;
     struct ch943x *s;
-
-    struct mutex ops_lock;
-    struct mutex can_lock;
     struct workqueue_struct *wq;
     struct work_struct tx_work;
     struct work_struct restart_work;
-
     spinlock_t tx_lock;
     bool tx_busy[3];
     u8 txm_pendbits;
-
-    int force_quit;
-    int after_suspend;
-#define AFTER_SUSPEND_UP      1
-#define AFTER_SUSPEND_DOWN    2
-#define AFTER_SUSPEND_POWER   4
-#define AFTER_SUSPEND_RESTART 8
-    int restart_tx;
     atomic_t can_isopen;
-    struct regulator *power;
-    struct regulator *transceiver;
 };
 
 struct can_tx_work {
@@ -748,6 +755,7 @@ struct can_tx_work {
     struct sk_buff *skb;
     int tx_mailbox_id;
 };
+#endif
 
 struct ch943x_one {
     struct uart_port port;
@@ -757,11 +765,9 @@ struct ch943x_one {
     struct work_struct stop_tx_work;
     struct serial_rs485 rs485;
     u8 msr_reg;
-    u8 ier;
     u8 mcr_force;
     atomic_t isopen;
     volatile bool txfifo_empty_flag;
-    bool tnow_on;
     u8 *txbuf;
     u8 *rxbuf;
 };
@@ -771,7 +777,9 @@ struct ch943x {
     struct device *dev;
     struct list_head ch943x_list;
     struct uart_driver uart;
+#ifdef CH9434D_CAN_ON
     struct ch943x_can_priv *priv;
+#endif
     struct mutex mutex;
     struct mutex mutex_bus_access;
 #ifdef USE_SPI_MODE
@@ -809,38 +817,31 @@ extern uint8_t ch943x_port_read(struct uart_port *port, uint8_t reg);
 extern int ch943x_port_write(struct uart_port *port, uint8_t reg, uint8_t val);
 extern int ch943x_reg_read(struct ch943x *s, u8 _cmd, u32 n_rx, void *rxbuf);
 extern int ch943x_reg_write(struct ch943x *s, u8 _cmd, u32 n_tx, const void *txbuf);
-extern int ch943x_port_read_version(struct ch943x *s, uint8_t reg, uint8_t *buf, uint8_t count);
 extern int ch943x_port_update(struct uart_port *port, uint8_t reg, uint8_t mask, uint8_t val);
 extern int ch943x_raw_write(struct uart_port *port, u8 reg, u8 *buf, u32 len);
 extern int ch943x_raw_read(struct uart_port *port, uint8_t reg, u8 *buf, u32 len);
+extern int ch943x_fcr_update(struct ch943x *s, int portno, uint8_t _val);
 extern int ch943x_get_chip_version(struct ch943x *s);
 extern int ch943x_scr_test(struct uart_port *port);
-
 extern int ch943x_port_bulkread(struct ch943x *s, u8 reg, uint8_t *buf, int len);
-
 extern int ch943x_register_uart_driver(struct ch943x *s);
 extern int ch943x_register_uart_port(struct ch943x *s);
 extern void ch943x_uart_remove(struct ch943x *s);
-
 extern irqreturn_t ch943x_ist_top(int irq, void *dev_id);
 extern irqreturn_t ch943x_ist(int irq, void *dev_id);
-
 extern void ch943x_port_irq_bulkmode(struct ch943x *s);
 extern void ch943x_port_irq(struct ch943x *s, int portno);
-
 #ifdef USE_SERIAL_MODE
 extern int ch943x_ctrl_tty_write(struct ch943x *s, u32 n_tx, const void *txbuf);
 extern int ch943x_ctrl_tty_read(struct ch943x *s, u32 n_rx, void *rxbuf);
-extern struct file *ch943x_ctrluart_open_as_root(const char *filename, int flags, umode_t mode);
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0))
 extern int ch943x_ctrluart_setopt(struct ch943x *s);
 #endif
 extern int ch9437_reg_bulkread_serialmode(struct ch943x *s, u8 *buf);
 #endif
-
 extern int ch943x_debugfs_init(struct ch943x *s);
 extern void ch943x_debugfs_exit(struct ch943x *s);
-
+#ifdef CH9434D_CAN_ON
 extern int ch943x_can_register(struct ch943x *s);
 extern void ch943x_can_remove(struct ch943x *s);
 extern void ch943x_can_irq(struct ch943x *s);
@@ -849,7 +850,7 @@ extern u32 ch943x_canreg_read(struct ch943x *s, u8 reg);
 
 extern int ch943x_rxmailbox_read(struct ch943x *s, u8 reg, u8 *rxbuf);
 extern int ch943x_txmailbox_write(struct ch943x *s, u8 reg, u32 n_tx, const void *txbuf);
-
+#endif
 extern int ch943x_io_enable(struct ch943x *s);
 extern int __ch943x_io_ioctl(struct ch943x *s, unsigned int cmd, unsigned long arg);
 
@@ -860,11 +861,7 @@ extern int __ch943x_io_ioctl(struct ch943x *s, unsigned int cmd, unsigned long a
  */
 
 /* external crystal freq */
-#define CRYSTAL_FREQ 22118400
-
-// #define USE_IRQ_FROM_DTS
-// #define GPIO_NUMBER 0
-// #define USE_SPI_MODE
+#define CRYSTAL_FREQ   22118400
 #define CH43X_NAME     "ch43x"
 #define CH43X_NAME_SPI "ch43x_spi"
 
@@ -977,7 +974,6 @@ struct ch43x_one {
     struct work_struct stop_tx_work;
     struct serial_rs485 rs485;
     unsigned char msr_reg;
-    unsigned char ier;
     unsigned char mcr_force;
 };
 

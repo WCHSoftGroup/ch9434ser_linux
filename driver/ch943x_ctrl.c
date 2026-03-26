@@ -1,22 +1,5 @@
 #include "ch943x.h"
 
-#define SPI_W_CAN_DELAY1_US 3
-
-#define SPI_W_CAN_ADD_SYNC_CODE  0x22
-#define SPI_W_CAN_ADD_INCP_CODE  0x24
-#define SPI_W_CAN_DEAL_SYNC_CODE 0x28
-#define SPI_W_CAN_DEAL_INCP_CODE 0x30
-
-#define SPI_R_CAN_ADD_SYNC_CODE  0x22
-#define SPI_R_CAN_ADD_INCP_CODE  0x24
-#define SPI_R_CAN_DATA_SYNC_CODE 0x28
-#define SPI_R_CAN_DATA_INCP_CODE 0x30
-
-#define W_WAIT_CAN_ADD_SYNC_CODE 0x42
-#define W_RSP_CAN_DATA_INCP_CODE 0x44
-#define R_WAIT_CAN_ADD_SYNC_CODE 0x42
-#define R_RSP_CAN_DATA_INCP_CODE 0x44
-
 #define REGS_BUFSIZE 4096
 
 static inline void spi_delay_set(struct spi_transfer *xfer, unsigned int value)
@@ -274,8 +257,8 @@ int ch9437_reg_bulkread_serialmode(struct ch943x *s, u8 *buf)
     mutex_unlock(&s->mutex_bus_access);
 
     memcpy(buf, rxbuf, n_rx);
-    DRV_DEBUG_HEXDUMP("ch9437_reg_bulkread_serialmode tx: ", DUMP_PREFIX_NONE, 32, 1, txbuf, n_tx, false);
-    DRV_DEBUG_HEXDUMP("ch9437_reg_bulkread_serialmode rx: ", DUMP_PREFIX_NONE, 32, 1, rxbuf, n_rx, false);
+    DRV_DEBUG_HEXDUMP("tx: ", DUMP_PREFIX_NONE, 32, 1, txbuf, n_tx, false);
+    DRV_DEBUG_HEXDUMP("rx: ", DUMP_PREFIX_NONE, 32, 1, rxbuf, n_rx, false);
 
     return n_rx;
 }
@@ -551,6 +534,7 @@ int ch943x_reg_read(struct ch943x *s, u8 _cmd, u32 n_rx, void *rxbuf)
     return ret;
 }
 
+#ifdef CH9434D_CAN_ON
 #ifndef CH943X_CANREG_NOTIMEINTER
 static int ch943x_transfer_read_can(struct ch943x *s, u8 _cmd, u8 _reg, u32 n_rx, void *rxbuf)
 {
@@ -1001,6 +985,7 @@ int ch943x_txmailbox_write(struct ch943x *s, u8 reg, u32 n_tx, const void *txbuf
 #endif
     return 0;
 }
+#endif
 
 u8 ch943x_port_read(struct uart_port *port, u8 reg)
 {
@@ -1009,7 +994,7 @@ u8 ch943x_port_read(struct uart_port *port, u8 reg)
     u8 val = 0x00;
     int retval;
 
-    if ((s->chip.chiptype == CHIP_CH9438) || (s->chip.chiptype == CHIP_CH9437))
+    if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F))
         cmd = 0x00 | (port->line * 8 + reg);
     else
         cmd = (0x00 | reg) + (port->line * 0x10);
@@ -1030,7 +1015,7 @@ int ch943x_port_write(struct uart_port *port, u8 reg, u8 val)
     u8 cmd;
     int retval;
 
-    if ((s->chip.chiptype == CHIP_CH9438) || (s->chip.chiptype == CHIP_CH9437))
+    if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F))
         cmd = 0x80 | (port->line * 8 + reg);
     else
         cmd = (0x80 | reg) + (port->line * 0x10);
@@ -1056,8 +1041,8 @@ int ch943x_port_bulkread(struct ch943x *s, u8 reg, u8 *buf, int len)
         return retval;
     }
 
-    DRV_DEBUG(s->dev, "%s - cmd:%02x, len:%d\n", __func__, cmd, len);
-    DRV_DEBUG_HEXDUMP("data: ", DUMP_PREFIX_NONE, 16, 1, buf, len, false);
+    DRV_DEBUG(s->dev, "%s cmd:%02x len:%d\n", __func__, cmd, len);
+    DRV_DEBUG_HEXDUMP("data: ", DUMP_PREFIX_NONE, 32, 1, buf, len, false);
 
     return 0;
 }
@@ -1173,18 +1158,81 @@ int ch943x_iofunc_set(struct ch943x *s, u8 io_cmd, u8 io_addr, u8 enable)
     return ret;
 }
 
-int ch943x_port_read_version(struct ch943x *s, u8 reg, u8 *buf, u8 count)
+int ch943x_fcr_update(struct ch943x *s, int portno, uint8_t _val)
 {
-    u8 cmd = reg;
+    uint8_t cmd;
+    uint8_t val = _val;
     int retval;
+#ifdef USE_SPI_MODE
+    struct spi_message m;
+    struct spi_transfer xfer[3] = {};
+#elif defined(USE_I2C_MODE)
+    struct i2c_client *i2c = s->i2c;
+    struct i2c_msg xfer[2] = {};
+#elif defined(USE_SERIAL_MODE)
+#endif
 
-    retval = ch943x_reg_read(s, cmd, 4, buf);
+    if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F))
+        cmd = 0x80 | (portno * 8 + CH943X_FCR_REG);
+    else
+        cmd = (0x80 | CH943X_FCR_REG) + (portno * 0x10);
+
+#ifdef USE_SPI_MODE
+    xfer[0].tx_buf = &cmd;
+    xfer[0].len = 1;
+    xfer[0].cs_change = 0;
+    spi_delay_set(&xfer[0], CH943X_CMD_DELAY);
+
+    xfer[1].tx_buf = &val;
+    xfer[1].len = 1;
+    xfer[1].cs_change = 0;
+    spi_delay_set(&xfer[1], CH943X_CMD_DELAY);
+
+    mutex_lock(&s->mutex_bus_access);
+    spi_message_init(&m);
+    spi_message_add_tail(&xfer[0], &m);
+    spi_message_add_tail(&xfer[1], &m);
+    retval = spi_sync(s->spi_dev, &m);
+    udelay(2000);
+    mutex_unlock(&s->mutex_bus_access);
     if (retval < 0) {
-        dev_err(s->dev, "%s ch943x read version failed.\n", __func__);
+        dev_err(s->dev, "%s spi transfer failed\n", __func__);
         return retval;
     }
-    DRV_DEBUG(s->dev, "%s - cmd:%02x buf:%02x %02x %02x %02x\n", __func__, cmd, buf[0], buf[1], buf[2], buf[3]);
+#elif defined(USE_I2C_MODE)
+    mutex_lock(&s->mutex_bus_access);
+    s->local_buf[0] = cmd;
+    s->local_buf[1] = val;
 
+    xfer[0].addr = i2c->addr;
+    xfer[0].flags = 0;
+    xfer[0].len = 2;
+    xfer[0].buf = s->local_buf;
+
+    retval = i2c_transfer(i2c->adapter, xfer, 1);
+    if (retval != 1) {
+        mutex_unlock(&s->mutex_bus_access);
+        dev_err(&i2c->dev, "%s i2c transfer failed\n", __func__);
+        return -EIO;
+    }
+    udelay(2000);
+    mutex_unlock(&s->mutex_bus_access);
+#elif defined(USE_SERIAL_MODE)
+    mutex_lock(&s->mutex_bus_access);
+    s->local_buf[0] = 0x57;
+    s->local_buf[1] = 0xab;
+    s->local_buf[2] = cmd;
+    s->local_buf[3] = val;
+
+    retval = ch943x_ctrl_tty_write(s, 4, s->local_buf);
+    if (retval < 0) {
+        dev_err(s->dev, "%s control uart write error. retval:%d\n", __func__, retval);
+        mutex_unlock(&s->mutex_bus_access);
+        return retval;
+    }
+    udelay(2000);
+    mutex_unlock(&s->mutex_bus_access);
+#endif
     return 0;
 }
 
@@ -1199,16 +1247,17 @@ int ch943x_raw_write(struct uart_port *port, u8 cmd, u8 *buf, u32 len)
     struct spi_transfer xfer[2] = {};
 #endif
 
-    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432) || (s->chip.chiptype == CHIP_CH9438) ||
-        ((s->chip.chiptype == CHIP_CH9437) && (s->chip.interface_mode == I2C_MODE))) {
+    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D) ||
+        (s->chip.chiptype == CHIP_CH9438F) ||
+        ((s->chip.chiptype == CHIP_CH9437F) && (s->chip.interface_mode == I2C_MODE))) {
         retval = ch943x_reg_write(s, cmd, len, buf);
         if (retval < 0) {
             dev_err(s->dev, "%s ch943x write txfifo failed.\n", __func__);
             return retval;
         }
-        DRV_DEBUG(s->dev, "%s - cmd:%02x[u%d], len:%d\n", __func__, cmd, port->line, len);
-        DRV_DEBUG_HEXDUMP("ch943x_raw_write tx: ", DUMP_PREFIX_NONE, 32, 1, buf, len, false);
-    } else if ((s->chip.chiptype == CHIP_CH9437) && (s->chip.interface_mode == SERIAL_MODE)) {
+        DRV_DEBUG(s->dev, "%s - cmd:%02x[u%d] len:%d\n", __func__, cmd, port->line, len);
+        DRV_DEBUG_HEXDUMP("tx: ", DUMP_PREFIX_NONE, 32, 1, buf, len, false);
+    } else if ((s->chip.chiptype == CHIP_CH9437F) && (s->chip.interface_mode == SERIAL_MODE)) {
 #ifdef USE_SERIAL_MODE
         retval = ch9437_serialmode_fifo_write(s, cmd, len, buf);
         if (retval < 0) {
@@ -1234,7 +1283,7 @@ int ch943x_raw_write(struct uart_port *port, u8 cmd, u8 *buf, u32 len)
                 dev_err(s->dev, "%s spi transfer failed\n", __func__);
                 return retval;
             }
-            DRV_DEBUG_HEXDUMP("ch943x_raw_write tx: ", DUMP_PREFIX_NONE, 32, 1, buf, len, false);
+            DRV_DEBUG_HEXDUMP("tx: ", DUMP_PREFIX_NONE, 32, 1, buf, len, false);
         } else {
             for (i = 0; i < len; i++) {
                 retval = ch943x_reg_write(s, cmd, 1, buf + i);
@@ -1262,21 +1311,22 @@ int ch943x_raw_read(struct uart_port *port, u8 reg, u8 *buf, u32 len)
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
-    if ((s->chip.chiptype == CHIP_CH9438) || (s->chip.chiptype == CHIP_CH9437)) {
+    if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F)) {
         cmd = 0x00 | (port->line * 8 + reg);
     } else {
         cmd = (0x00 | reg) + (port->line * 0x10);
     }
 
-    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432) || (s->chip.chiptype == CHIP_CH9438) ||
-        ((s->chip.chiptype == CHIP_CH9437) && (s->chip.interface_mode == I2C_MODE))) {
+    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D) ||
+        (s->chip.chiptype == CHIP_CH9438F) ||
+        ((s->chip.chiptype == CHIP_CH9437F) && (s->chip.interface_mode == I2C_MODE))) {
         retval = ch943x_reg_read(s, cmd, len, s->rxfifo_buf);
         if (retval < 0) {
             dev_err(s->dev, "%s ch943x read rxfifo failed.\n", __func__);
             return retval;
         }
         DRV_DEBUG(s->dev, "%s - cmd:%02x[u%d], len:%d\n", __func__, cmd, port->line, len);
-        DRV_DEBUG_HEXDUMP("ch943x_raw_read rx: ", DUMP_PREFIX_NONE, 32, 1, s->rxfifo_buf, len, false);
+        DRV_DEBUG_HEXDUMP("rx: ", DUMP_PREFIX_NONE, 32, 1, s->rxfifo_buf, len, false);
         memcpy(buf, s->rxfifo_buf, len);
     } else if (s->chip.chiptype == CHIP_CH9434A) {
 #ifdef USE_SPI_MODE
@@ -1296,8 +1346,9 @@ int ch943x_raw_read(struct uart_port *port, u8 reg, u8 *buf, u32 len)
             return retval;
         }
         memcpy(buf, s->rxfifo_buf + 2, len);
+        DRV_DEBUG_HEXDUMP("rx: ", DUMP_PREFIX_NONE, 32, 1, buf, len, false);
 #endif
-    } else if ((s->chip.chiptype == CHIP_CH9437) && (s->chip.interface_mode == SERIAL_MODE)) {
+    } else if ((s->chip.chiptype == CHIP_CH9437F) && (s->chip.interface_mode == SERIAL_MODE)) {
 #ifdef USE_SERIAL_MODE
         retval = ch9437_serialmode_fifo_read(s, cmd, len, s->rxfifo_buf);
         if (retval < 0) {
@@ -1318,12 +1369,13 @@ int ch943x_get_chip_version(struct ch943x *s)
 #endif
     int ret;
 
-    /* get chip type and version */
-    ret = ch943x_port_read_version(s, CH943X_CHIP_VER_REG, s->chip.ver, VER_LEN);
-    if (ret) {
-        dev_err(s->dev, "Get CH943X chip version failed\n");
-        return -1;
+    ret = ch943x_reg_read(s, CH943X_CHIP_VER_REG, VER_LEN, s->chip.ver);
+    if (ret < 0) {
+        dev_err(s->dev, "%s ch943x read version failed.\n", __func__);
+        return ret;
     }
+    DRV_DEBUG(s->dev, "%s - cmd:%02x buf:%02x %02x %02x %02x\n", __func__, CH943X_CHIP_VER_REG, s->chip.ver[0],
+              s->chip.ver[1], s->chip.ver[2], s->chip.ver[3]);
 
     if ((s->chip.ver[3] == 0x5A) && (s->chip.ver[2] == (s->chip.ver[0] + s->chip.ver[1]))) {
 #ifdef USE_SPI_MODE
@@ -1342,13 +1394,13 @@ int ch943x_get_chip_version(struct ch943x *s)
         s->chip.chiptype = CHIP_CH9434D;
         strcpy(s->chip.chip_name, "CH9434D");
     } else if ((s->chip.ver[3] == 0x7C) && (s->chip.ver[2] == (s->chip.ver[0] + s->chip.ver[1]))) {
-        s->chip.chiptype = CHIP_CH9438;
+        s->chip.chiptype = CHIP_CH9438F;
         strcpy(s->chip.chip_name, "CH9438");
     } else if ((s->chip.ver[3] == 0x8D) && (s->chip.ver[2] == (s->chip.ver[0] + s->chip.ver[1]))) {
-        s->chip.chiptype = CHIP_CH9437;
+        s->chip.chiptype = CHIP_CH9437F;
         strcpy(s->chip.chip_name, "CH9437");
     } else if ((s->chip.ver[3] == 0x9E) && (s->chip.ver[2] == (s->chip.ver[0] + s->chip.ver[1]))) {
-        s->chip.chiptype = CHIP_CH9432;
+        s->chip.chiptype = CHIP_CH9432D;
         strcpy(s->chip.chip_name, "CH9432");
     } else {
         s->chip.chiptype = CHIP_CH9434M;
@@ -1464,7 +1516,7 @@ int ch943x_io_enable(struct ch943x *s)
     DRV_DEBUG(s->dev, "%s chiptype:%d TX/RX pin enable.\n", __func__, s->chip.chiptype);
 
     for (i = 0; i < s->chip.nr_uart; i++) {
-        if ((s->chip.chiptype == CHIP_CH9437) && IS_USE_SERIAL_MODE && (i == 0))
+        if ((s->chip.chiptype == CHIP_CH9437F) && IS_USE_SERIAL_MODE && (i == 0))
             continue;
         ch943x_iofunc_set(s, CH943X_IO_DEF_W_EN, CH943X_DEF_U0_ADD + i, 1); /* UART Tx/Rx Enable */
     }
@@ -1495,7 +1547,7 @@ int ch943x_io_enable(struct ch943x *s)
             ch943x_iofunc_set(s, CH943X_IO_DEF_W_EN, CH9434D_DEF_CTS3_ADD, 1); /* Modem CTS3 Enable */
         if (((s->tnow_enable_bits & BIT(1)) == 0) && (!s->can_on))
             ch943x_iofunc_set(s, CH943X_IO_MULTI_W_EN, CH9434D_MUL_RTS0_ADD, 1); /* Modem RTS0 Enable */
-    } else if (s->chip.chiptype == CHIP_CH9438) {
+    } else if (s->chip.chiptype == CHIP_CH9438F) {
         DRV_DEBUG(s->dev, "%s chiptype:%d XI/XO pin enable.\n", __func__, s->chip.chiptype);
         if (s->extern_clock_on)
             ch943x_iofunc_set(s, CH943X_IO_DEF_W_EN, CH943X_DEF_HSE_ADD, 1); /* External Clock Enable */
@@ -1528,7 +1580,7 @@ int ch943x_io_enable(struct ch943x *s)
             ch943x_iofunc_set(s, CH943X_IO_MULTI_W_EN, CH943X_MUL_CTS3_ADD, 1); /* CTS3 Enable */
         if (((s->tnow_enable_bits & BIT(7)) == 0) && !s->extern_clock_on)
             ch943x_iofunc_set(s, CH943X_IO_MULTI_W_EN, CH943X_MUL_CTS4_ADD, 1); /* CTS4 Enable */
-    } else if (s->chip.chiptype == CHIP_CH9437) {
+    } else if (s->chip.chiptype == CHIP_CH9437F) {
         DRV_DEBUG(s->dev, "%s chiptype:%d XI/XO pin enable.\n", __func__, s->chip.chiptype);
         if (s->extern_clock_on)
             ch943x_iofunc_set(s, CH943X_IO_DEF_W_EN, CH943X_DEF_HSE_ADD, 1); /* External Clock Enable */
@@ -1562,7 +1614,7 @@ int ch943x_io_enable(struct ch943x *s)
             ch943x_iofunc_set(s, CH943X_IO_MULTI_W_EN, CH943X_MUL_CTS4_ADD, 1); /* CTS4 Enable */
         if (s->chip.interface_mode != I2C_MODE)
             ch943x_iofunc_set(s, CH943X_IO_MULTI_W_EN, CH943X_MUL_CTS5_ADD, 1); /* CTS5 Enable */
-    } else if (s->chip.chiptype == CHIP_CH9432) {
+    } else if (s->chip.chiptype == CHIP_CH9432D) {
         DRV_DEBUG(s->dev, "%s chiptype:%d XI/XO pin enable.\n", __func__, s->chip.chiptype);
         if (s->extern_clock_on)
             ch943x_iofunc_set(s, CH943X_IO_DEF_W_EN, CH9432_DEF_HSE_ADD, 1); /* External Clock Enable */
@@ -2031,7 +2083,7 @@ static ssize_t ch943x_proc_read(struct file *file, char __user *user_buf, size_t
 
     len += snprintf(buf + len, REGS_BUFSIZE - len, "============ch943x registers:============\n");
     for (i = 0; i < s->chip.nr_uart; i++) {
-        if ((s->chip.chiptype == CHIP_CH9437) && IS_USE_SERIAL_MODE && (i == 0))
+        if ((s->chip.chiptype == CHIP_CH9437F) && IS_USE_SERIAL_MODE && (i == 0))
             continue;
         p = s->p + i;
 
@@ -2049,7 +2101,7 @@ static ssize_t ch943x_proc_read(struct file *file, char __user *user_buf, size_t
 
         len += snprintf(buf + len, REGS_BUFSIZE - len, "============UART%d Dump register at DLAB=0============\n", i);
         for (j = 0; j < 8; j++) {
-            if ((s->chip.chiptype == CHIP_CH9437) && IS_USE_SERIAL_MODE && (j == 0))
+            if ((s->chip.chiptype == CHIP_CH9437F) && IS_USE_SERIAL_MODE && (j == 0))
                 continue;
             val = ch943x_port_read(&p->port, j);
             len += snprintf(buf + len, REGS_BUFSIZE - len, "reg:0x%02x val:0x%02x\n", j, val);
