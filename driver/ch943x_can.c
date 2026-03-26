@@ -1,8 +1,8 @@
 #include "ch943x.h"
 
+#ifdef CH9434D_CAN_ON
 #define TX_MAILBOX_NR 3
 
-#ifdef CH9434D_CAN_ON
 struct rx_mailbox_info {
     u32 rxmdh; /* high byte of the receiving email address */
     u32 rxmdl; /* low byte of the receiving email address */
@@ -287,6 +287,8 @@ static int ch943x_setup(struct net_device *net, struct ch943x *s)
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
     ret = ch943x_can_init(s);
+    if (ret < 0)
+        return ret;
     ch943x_can_filterinit(s);
 
     return 0;
@@ -463,24 +465,22 @@ static int ch943x_open(struct net_device *ndev)
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
     ret = open_candev(ndev);
-    if (ret) {
+    if (ret < 0) {
         dev_err(s->dev, "unable to set initial baudrate!\n");
         return ret;
     }
 
     atomic_set(&s->priv->can_isopen, 1);
 
-    priv->force_quit = 0;
-
     INIT_WORK(&priv->tx_work, ch943x_tx_work_handler);
     INIT_WORK(&priv->restart_work, ch943x_restart_work_handler);
 
     ret = ch943x_setup(ndev, s);
-    if (ret)
+    if (ret < 0)
         return -1;
 
     ret = ch943x_set_mode(s);
-    if (ret)
+    if (ret < 0)
         return -1;
 
     return 0;
@@ -665,13 +665,13 @@ static void ch943x_hw_rx(struct ch943x *s, int rx_mailbox)
         /* Extended ID format */
         frame->can_id = CAN_EFF_FLAG;
         frame->can_id |= ((reg_val >> 3) & 0x1FFFFFFF);
-        /* Remote transmission request */
-        if ((u8)0x02 & reg_val)
-            frame->can_id |= CAN_RTR_FLAG;
     } else {
         /* Standard ID format */
         frame->can_id = ((reg_val >> 21) & 0x000007FF);
     }
+    /* Remote transmission request */
+    if ((u8)0x02 & reg_val)
+        frame->can_id |= CAN_RTR_FLAG;
 
     /* Data length */
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0))
@@ -722,13 +722,15 @@ static void ch943x_can_err(struct ch943x *s, u32 fifo0_state, u32 fifo1_state, u
     enum can_state new_state;
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
+    dev_err(s->dev, "CAN error, reg:%02x:%08x, reg:%02x:%08x, reg:%02x:%08x\n", CH9434D_CAN_RFIFO0, fifo0_state,
+            CH9434D_CAN_RFIFO1, fifo1_state, CH9434D_CAN_ERRSR, err_state);
 
     skb = alloc_can_err_skb(ndev, &frame);
     if (!skb)
         return;
 
     if ((fifo0_state & CAN_RFIFOx_FOVRx) || (fifo1_state & CAN_RFIFOx_FOVRx)) {
-        dev_err(s->dev, "CAN data overrun\n");
+        dev_err(s->dev, "CAN RX overrun\n");
         frame->can_id |= CAN_ERR_CRTL;
         frame->data[1] = CAN_ERR_CRTL_RX_OVERFLOW;
         stats->rx_over_errors++;
@@ -737,16 +739,24 @@ static void ch943x_can_err(struct ch943x *s, u32 fifo0_state, u32 fifo1_state, u
 
     /* Update can state */
     if (err_state & CAN_ERRSR_EWGF) {
+        dev_err(s->dev, "CAN RX/TX error count RX:%d TX:%d\n", (err_state >> 24) & 0xff, (err_state >> 16) & 0xff);
         new_state = CAN_STATE_ERROR_ACTIVE;
-    } else if (err_state & (CAN_ERRSR_EPVF | CAN_ERRSR_REC)) {
-        new_state = CAN_STATE_ERROR_PASSIVE;
-        frame->can_id |= CAN_ERR_CRTL;
-        frame->data[1] = CAN_ERR_CRTL_RX_PASSIVE;
-    } else if (err_state & (CAN_ERRSR_EPVF | CAN_ERRSR_TEC)) {
-        new_state = CAN_STATE_ERROR_PASSIVE;
-        frame->can_id |= CAN_ERR_CRTL;
-        frame->data[1] = CAN_ERR_CRTL_TX_PASSIVE;
+        s->priv->can.can_stats.error_warning++;
+    } else if (err_state & CAN_ERRSR_EPVF) {
+        dev_err(s->dev, "CAN RX/TX error count RX:%d TX:%d\n", (err_state >> 24) & 0xff, (err_state >> 16) & 0xff);
+        if (err_state & CAN_ERRSR_REC) {
+            new_state = CAN_STATE_ERROR_PASSIVE;
+            frame->can_id |= CAN_ERR_CRTL;
+            frame->data[1] = CAN_ERR_CRTL_RX_PASSIVE;
+        }
+        if (err_state & CAN_ERRSR_TEC) {
+            new_state = CAN_STATE_ERROR_PASSIVE;
+            frame->can_id |= CAN_ERR_CRTL;
+            frame->data[1] = CAN_ERR_CRTL_TX_PASSIVE;
+        }
+        s->priv->can.can_stats.error_passive++;
     } else if (err_state & CAN_ERRSR_BOFF) {
+        dev_err(s->dev, "CAN bus-off\n");
         new_state = CAN_STATE_BUS_OFF;
         frame->can_id |= CAN_ERR_BUSOFF;
         s->priv->can.can_stats.bus_off++;
@@ -755,20 +765,6 @@ static void ch943x_can_err(struct ch943x *s, u32 fifo0_state, u32 fifo1_state, u
     }
 
     /* Update can state statistics */
-    switch (s->priv->can.state) {
-    case CAN_STATE_ERROR_ACTIVE:
-        if (new_state >= CAN_STATE_ERROR_WARNING && new_state <= CAN_STATE_BUS_OFF)
-            s->priv->can.can_stats.error_warning++;
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
-        fallthrough;
-#endif
-    case CAN_STATE_ERROR_WARNING: /* fallthrough */
-        if (new_state >= CAN_STATE_ERROR_PASSIVE && new_state <= CAN_STATE_BUS_OFF)
-            s->priv->can.can_stats.error_passive++;
-        break;
-    default:
-        break;
-    }
     s->priv->can.state = new_state;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0))
     netif_rx(skb);

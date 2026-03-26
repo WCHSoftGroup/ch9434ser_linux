@@ -22,9 +22,9 @@ static int ch943x_set_baud(struct uart_port *port, int baud)
     u64 integerdivider = 0x00;
     u32 fractionaldivider = 0x00;
 
-    DRV_DEBUG(s->dev, "%s - %d\n", __func__, baud);
+    DRV_DEBUG(s->dev, "%s u%d %d\n", __func__, port->line, baud);
 
-    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432)) {
+    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D)) {
         integerdivider = ((u64)25 * 96000000);
         do_div(integerdivider, 4 * baud);
         x = (integerdivider / 100) << 4;
@@ -32,7 +32,7 @@ static int ch943x_set_baud(struct uart_port *port, int baud)
         x |= ((((fractionaldivider * 16) + 50) / 100)) & ((u8)0x0F);
         dll = x & 0xff;
         dlm = (x >> 8) & 0xff;
-    } else if ((s->chip.chiptype == CHIP_CH9438) || (s->chip.chiptype == CHIP_CH9437)) {
+    } else if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F)) {
         integerdivider = ((u64)25 * 192000000);
         do_div(integerdivider, 4 * baud);
         x = (integerdivider / 100) << 4;
@@ -59,8 +59,8 @@ static int ch943x_set_baud(struct uart_port *port, int baud)
     ch943x_port_write(port, CH943X_LCR_REG, CH943X_LCR_CONF_MODE_A);
 
     /* Write the new divisor */
-    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432) || (s->chip.chiptype == CHIP_CH9438) ||
-        (s->chip.chiptype == CHIP_CH9437)) {
+    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D) ||
+        (s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F)) {
         ch943x_port_write(port, CH943X_DLL_REG, dll);
         ch943x_port_write(port, CH943X_DLH_REG, dlm);
     } else {
@@ -74,34 +74,15 @@ static int ch943x_set_baud(struct uart_port *port, int baud)
     return DIV_ROUND_CLOSEST(clk / 16, dll | (dlm << 8));
 }
 
-static void ch943x_handle_rx(struct uart_port *port, u32 rxlen, u32 iir, u32 lsr_reg)
+static void ch943x_handle_rx(struct uart_port *port, u32 rxlen, u8 iir, u8 lsr)
 {
     struct ch943x *s = dev_get_drvdata(port->dev);
     struct ch943x_one *one = to_ch943x_one(port, port);
-    u32 lsr = 0, ch, flag, bytes_read = 0, i;
-    bool read_lsr = (iir == CH943X_IIR_RLSE_SRC) ? true : false;
+    u8 ch;
+    u32 flag, bytes_read = 0, i;
     int ret;
 
-    DRV_DEBUG(s->dev, "%s\n", __func__);
-
-    if ((s->chip.chiptype == CHIP_CH9438) || ((s->chip.chiptype == CHIP_CH9437) && IS_USE_SERIAL_MODE) ||
-        ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_SPI_MODE) ||
-        ((s->chip.chiptype == CHIP_CH9432) && IS_USE_SPI_MODE)) {
-        if (read_lsr) {
-            lsr = lsr_reg;
-        } else {
-            lsr = 0;
-        }
-    } else {
-        if (read_lsr) {
-            lsr = ch943x_port_read(port, CH943X_LSR_REG);
-            /* No errors left in FIFO */
-            if (!(lsr & CH943X_LSR_FIFOE_BIT))
-                read_lsr = false;
-        } else {
-            lsr = 0;
-        }
-    }
+    DRV_DEBUG(s->dev, "%s u%d\n", __func__, port->line);
 
     if (s->chip.chiptype == CHIP_CH9434A) {
 #ifdef USE_SPI_MODE
@@ -137,10 +118,13 @@ static void ch943x_handle_rx(struct uart_port *port, u32 rxlen, u32 iir, u32 lsr
         port->icount.rx += rxlen;
     }
 
-    flag = TTY_NORMAL;
+    if (atomic_read(&one->isopen) == 0) {
+        return;
+    }
 
+    flag = TTY_NORMAL;
     if (unlikely(lsr & CH943X_LSR_BRK_ERROR_MASK)) {
-        dev_err(s->dev, "%s - lsr(%02x) error detect\n", __func__, lsr);
+        dev_err(s->dev, "%s u%d lsr(%02x) error detect\n", __func__, port->line, lsr);
         if (lsr & CH943X_LSR_BI_BIT) {
             lsr &= ~(CH943X_LSR_FE_BIT | CH943X_LSR_PE_BIT);
             port->icount.brk++;
@@ -162,17 +146,19 @@ static void ch943x_handle_rx(struct uart_port *port, u32 rxlen, u32 iir, u32 lsr
             flag = TTY_FRAME;
 
         if (lsr & CH943X_LSR_OE_BIT)
-            dev_err(s->dev, "%s - overrun detect\n", __func__);
+            dev_err(s->dev, "%s u%d overrun detect\n", __func__, port->line);
     }
 
     for (i = 0; i < bytes_read; i++) {
         ch = one->rxbuf[i];
 
-        if (uart_handle_sysrq_char(port, ch))
+        if (uart_handle_sysrq_char(port, ch)) {
             continue;
+        }
 
-        if (lsr & port->ignore_status_mask)
+        if (lsr & port->ignore_status_mask) {
             continue;
+        }
 
         uart_insert_char(port, lsr, CH943X_LSR_OE_BIT, ch, flag);
     }
@@ -189,7 +175,7 @@ static void ch943x_handle_tx(struct uart_port *port)
     u32 txlen, to_send, i;
     unsigned char cmd;
 
-    DRV_DEBUG(s->dev, "%s\n", __func__);
+    DRV_DEBUG(s->dev, "%s u%d\n", __func__, port->line);
 
     /* xon/xoff char */
     if (unlikely(port->x_char)) {
@@ -200,6 +186,7 @@ static void ch943x_handle_tx(struct uart_port *port)
     }
 
     if (uart_circ_empty(xmit) || uart_tx_stopped(port)) {
+        DRV_DEBUG(s->dev, "u%d has no data or has stop send\n", port->line);
         ch943x_port_update(port, CH943X_IER_REG, CH943X_IER_THRI_BIT, 0);
         s->p[port->line].txfifo_empty_flag = false;
         return;
@@ -222,9 +209,7 @@ static void ch943x_handle_tx(struct uart_port *port)
             xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
         }
 
-        DRV_DEBUG(s->dev, "ch943x_handle_tx port:%d to_send:%d\n", port->line, to_send);
-
-        if ((s->chip.chiptype == CHIP_CH9438) || (s->chip.chiptype == CHIP_CH9437)) {
+        if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F)) {
             cmd = (0x80 | (CH943X_THR_REG + port->line * 8));
         } else {
             cmd = (0x80 | CH943X_THR_REG) + (port->line * 0x10);
@@ -251,10 +236,11 @@ void ch943x_port_irq_bulkmode(struct ch943x *s)
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
-    if ((s->chip.chiptype == CHIP_CH9438) || (s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432)) {
+    if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9434D) ||
+        (s->chip.chiptype == CHIP_CH9432D)) {
         ret = ch943x_port_bulkread(s, CH943X_PORT_CMD_BULKMODE, regbuf, nr_regs * s->chip.nr_uart);
         memcpy(reg, regbuf, nr_regs * s->chip.nr_uart);
-    } else if (s->chip.chiptype == CHIP_CH9437 && s->chip.interface_mode == SERIAL_MODE) {
+    } else if (s->chip.chiptype == CHIP_CH9437F && s->chip.interface_mode == SERIAL_MODE) {
 #ifdef USE_SERIAL_MODE
         retlen = ch9437_reg_bulkread_serialmode(s, regbuf);
         memcpy(reg + 1, regbuf, retlen);
@@ -262,16 +248,16 @@ void ch943x_port_irq_bulkmode(struct ch943x *s)
     }
 
     for (i = 0; i < s->chip.nr_uart; i++) {
-        if ((s->chip.chiptype == CHIP_CH9437) && (i == 0))
+        if ((s->chip.chiptype == CHIP_CH9437F) && (i == 0))
             continue;
 
-        if (reg[i].lsr & 0x02) {
+        if (reg[i].lsr & CH943X_LSR_OE_BIT) {
             s->p[i].port.icount.overrun++;
-            dev_err(s->dev, "Rx Overrun portno:%d, lsr:%02x\n", i, reg[i].lsr);
+            dev_err(s->dev, "u%d rxfifo overrun lsr:%02x\n", i, reg[i].lsr);
         }
 
         if (reg[i].iir & CH943X_IIR_NO_INT_BIT) {
-            DRV_DEBUG(s->dev, "%s uart%d no int, quit\n", __func__, i);
+            DRV_DEBUG(s->dev, "%s u%d has no int\n", __func__, i);
             continue;
         }
 
@@ -281,14 +267,17 @@ void ch943x_port_irq_bulkmode(struct ch943x *s)
         case CH943X_IIR_RLSE_SRC:
         case CH943X_IIR_RTOI_SRC:
             rxlen = reg[i].rfifo_cnt_l | (reg[i].rfifo_cnt_h << 8);
-            DRV_DEBUG(s->dev, "%s rxlen = %d\n", __func__, rxlen);
+            DRV_DEBUG(s->dev, "%s u%d rxlen:%d\n", __func__, i, rxlen);
 
-            if (rxlen == 0xFFFF) {
-                dev_err(s->dev, "Illegal length:%d", rxlen);
+            if (unlikely(rxlen == 0xFFFF)) {
+                dev_err(s->dev, "u%d incorrect rxfifo len:%d", i, rxlen);
+                break;
+            } else if (unlikely(rxlen == 0)) {
+                dev_info(s->dev, "%s u%d rxlen:%d iir:%02x", __func__, i, rxlen, reg[i].iir);
                 break;
             }
 
-            if ((s->chip.chiptype == CHIP_CH9437) && IS_USE_SERIAL_MODE) {
+            if ((s->chip.chiptype == CHIP_CH9437F) && IS_USE_SERIAL_MODE) {
                 packet_cnts = rxlen / (1536 - 128);
                 left = rxlen % (1536 - 128);
                 while (packet_cnts--) {
@@ -325,17 +314,20 @@ void ch943x_port_irq(struct ch943x *s, int portno)
 {
     struct ch943x_one *p = s->p + portno;
     struct uart_port *port = &p->port;
-    u32 iir, msr, rxlen = 0;
+    u8 iir, lsr, msr;
+    u16 rxlen = 0;
     u8 rxlen_l, rxlen_h, data;
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
     iir = ch943x_port_read(port, CH943X_IIR_REG);
     if (iir & CH943X_IIR_NO_INT_BIT) {
-        DRV_DEBUG(s->dev, "%s no int or port not open, quit\n", __func__);
+        DRV_DEBUG(s->dev, "u%d has no int\n", port->line);
         return;
     }
+
     iir &= CH943X_IIR_ID_MASK;
+    lsr = (iir == CH943X_IIR_RLSE_SRC) ? ch943x_port_read(port, CH943X_LSR_REG) : 0;
     switch (iir) {
     case CH943X_IIR_RDI_SRC:
     case CH943X_IIR_RLSE_SRC:
@@ -345,15 +337,19 @@ void ch943x_port_irq(struct ch943x *s, int portno)
         ch943x_reg_read(s, CH943X_FIFOCL_REG, 1, &rxlen_l);
         ch943x_reg_read(s, CH943X_FIFOCH_REG, 1, &rxlen_h);
         rxlen = rxlen_l | (rxlen_h << 8);
-        DRV_DEBUG(s->dev, "%s rxlen:%d\n", __func__, rxlen);
+        DRV_DEBUG(s->dev, "%s u%d rxlen:%d\n", __func__, portno, rxlen);
 
-        if (rxlen == 0xFFFF) {
-            dev_err(port->dev, "illegal RBR length:%d", rxlen);
+        if (unlikely(rxlen == 0xFFFF)) {
+            dev_err(port->dev, "u%d incorrect rxfifo len:%d", portno, rxlen);
+            break;
+        } else if (unlikely(rxlen == 0)) {
+            dev_info(port->dev, "%s u%d rxlen:%d iir:%02x", __func__, port->line, rxlen, iir);
             break;
         }
         if (rxlen > 2048)
             rxlen = 2048;
-        ch943x_handle_rx(port, rxlen, iir, 0);
+
+        ch943x_handle_rx(port, rxlen, iir, lsr);
         break;
     case CH943X_IIR_MSI_SRC:
         msr = ch943x_port_read(port, CH943X_MSR_REG);
@@ -377,11 +373,18 @@ static void ch943x_wq_proc(struct work_struct *ws)
 {
     struct ch943x_one *one = to_ch943x_one(ws, tx_work);
     struct ch943x *s = dev_get_drvdata(one->port.dev);
+    uint8_t val;
 
     DRV_DEBUG(s->dev, "%s u%d\n", __func__, one->port.line);
 
     mutex_lock(&s->mutex);
-    ch943x_port_update(&one->port, CH943X_IER_REG, CH943X_IER_THRI_BIT, CH943X_IER_THRI_BIT);
+    val = ch943x_port_read(&one->port, CH943X_IER_REG);
+    if (val & CH943X_IER_THRI_BIT) {
+        val &= ~CH943X_IER_THRI_BIT;
+        ch943x_port_write(&one->port, CH943X_IER_REG, val);
+    }
+    val |= CH943X_IER_THRI_BIT;
+    ch943x_port_write(&one->port, CH943X_IER_REG, val);
     mutex_unlock(&s->mutex);
 }
 
@@ -465,7 +468,7 @@ static u32 ch943x_tx_empty(struct uart_port *port)
     u32 lsr;
     u32 result;
 
-    DRV_DEBUG(s->dev, "u%d %s\n", port->line, __func__);
+    DRV_DEBUG(s->dev, "%s u%d\n", __func__, port->line);
 
     lsr = ch943x_port_read(port, CH943X_LSR_REG);
     result = (lsr & CH943X_LSR_THRE_BIT) ? TIOCSER_TEMT : 0;
@@ -519,7 +522,7 @@ static void ch943x_md_proc(struct work_struct *ws)
 
     mcr |= one->mcr_force;
 
-    DRV_DEBUG(s->dev, "%s - mcr:0x%02x, force:0x%2x\n", __func__, mcr, one->mcr_force);
+    DRV_DEBUG(s->dev, "%s - mcr:%02x, force:%02x\n", __func__, mcr, one->mcr_force);
 
     ch943x_port_write(&one->port, CH943X_MCR_REG, mcr);
 }
@@ -529,7 +532,7 @@ static void ch943x_set_mctrl(struct uart_port *port, u32 mctrl)
     struct ch943x_one *one = to_ch943x_one(port, port);
     struct ch943x *s = dev_get_drvdata(one->port.dev);
 
-    DRV_DEBUG(s->dev, "%s - mctrl:0x%x\n", __func__, mctrl);
+    DRV_DEBUG(s->dev, "%s u%d mctrl:%08x\n", __func__, port->line, mctrl);
 
     schedule_work(&one->md_work);
 }
@@ -539,7 +542,7 @@ static void ch943x_break_ctl(struct uart_port *port, int break_state)
     struct ch943x *s = dev_get_drvdata(port->dev);
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
-    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432))
+    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D))
         return;
     else
         ch943x_port_update(port, CH943X_LCR_REG, CH943X_LCR_TXBREAK_BIT, break_state ? CH943X_LCR_TXBREAK_BIT : 0);
@@ -557,7 +560,7 @@ static void ch943x_set_termios(struct uart_port *port, struct ktermios *termios,
     int baud;
     u8 bParityType;
 
-    DRV_DEBUG(s->dev, "%s\n", __func__);
+    DRV_DEBUG(s->dev, "%s u%d\n", __func__, port->line);
 
     /* Word size */
     switch (termios->c_cflag & CSIZE) {
@@ -587,23 +590,23 @@ static void ch943x_set_termios(struct uart_port *port, struct ktermios *termios,
     switch (bParityType) {
     case 0x01:
         lcr |= CH943X_LCR_ODDPARITY_BIT;
-        DRV_DEBUG(s->dev, "parity = odd\n");
+        DRV_DEBUG(s->dev, "%s u%d parity:odd\n", __func__, port->line);
         break;
     case 0x02:
         lcr |= CH943X_LCR_EVENPARITY_BIT;
-        DRV_DEBUG(s->dev, "parity = even\n");
+        DRV_DEBUG(s->dev, "%s u%d parity:even\n", __func__, port->line);
         break;
     case 0x03:
         lcr |= CH943X_LCR_MARKPARITY_BIT;
-        DRV_DEBUG(s->dev, "parity = mark\n");
+        DRV_DEBUG(s->dev, "%s u%d parity:mark\n", __func__, port->line);
         break;
     case 0x04:
         lcr |= CH943X_LCR_SPACEPARITY_BIT;
-        DRV_DEBUG(s->dev, "parity = space\n");
+        DRV_DEBUG(s->dev, "%s u%d parity:space\n", __func__, port->line);
         break;
     default:
         lcr &= ~CH943X_LCR_PARITY_BIT;
-        DRV_DEBUG(s->dev, "parity = none\n");
+        DRV_DEBUG(s->dev, "%s u%d parity:none\n", __func__, port->line);
         break;
     }
 
@@ -626,8 +629,8 @@ static void ch943x_set_termios(struct uart_port *port, struct ktermios *termios,
         port->ignore_status_mask |= CH943X_LSR_BRK_ERROR_MASK;
 
     /* Update LCR register */
-    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432) || (s->chip.chiptype == CHIP_CH9438) ||
-        (s->chip.chiptype == CHIP_CH9437)) {
+    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D) ||
+        (s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F)) {
         if ((bParityType == 0x01) || (bParityType == 0x02)) {
             lcr &= ~(BIT(0) | BIT(1));
         }
@@ -636,7 +639,7 @@ static void ch943x_set_termios(struct uart_port *port, struct ktermios *termios,
 
     /* Configure flow control */
     if (termios->c_cflag & CRTSCTS) {
-        DRV_DEBUG(s->dev, "ch943x_set_termios enable rts/cts flow control\n");
+        DRV_DEBUG(s->dev, "%s u%d enable rts/cts flow control\n", __func__, port->line);
         ch943x_port_update(port, CH943X_MCR_REG, CH943X_MCR_AFE | CH943X_MCR_RTS_BIT,
                            CH943X_MCR_AFE | CH943X_MCR_RTS_BIT);
         one->mcr_force |= CH943X_MCR_AFE | CH943X_MCR_RTS_BIT;
@@ -644,7 +647,7 @@ static void ch943x_set_termios(struct uart_port *port, struct ktermios *termios,
         // add on 20200608 suppose cts status is always valid here
         uart_handle_cts_change(port, 1);
     } else {
-        DRV_DEBUG(s->dev, "ch943x_set_termios disable rts/cts flow control\n");
+        DRV_DEBUG(s->dev, "%s u%d disable rts/cts flow control\n", __func__, port->line);
         ch943x_port_update(port, CH943X_MCR_REG, CH943X_MCR_AFE, 0);
         one->mcr_force &= ~(CH943X_MCR_AFE | CH943X_MCR_RTS_BIT);
     }
@@ -662,23 +665,22 @@ static int ch943x_startup(struct uart_port *port)
     struct ch943x_one *one = to_ch943x_one(port, port);
     u8 val;
 
-    DRV_DEBUG(s->dev, "%s\n", __func__);
+    DRV_DEBUG(s->dev, "%s u%d\n", __func__, port->line);
 
-    atomic_set(&one->isopen, 1);
-
-    /* Reset FIFOs and configure RX-FIFO levels to 8 */
-    ch943x_port_write(port, CH943X_FCR_REG, CH943X_FCR_RXRESET_BIT | CH943X_FCR_TXRESET_BIT | CH943X_FCR_FIFO_BIT);
-    udelay(2000);
-
-    /* Initialize the UART */
-    ch943x_port_write(port, CH943X_LCR_REG, CH943X_LCR_WORD_LEN_8);
+    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D) ||
+        (s->chip.chiptype == CHIP_CH9437F) || (s->chip.chiptype == CHIP_CH9438F)) {
+        ch943x_fcr_update(s, port->line, CH943X_FCR_RXRESET_BIT | CH943X_FCR_TXRESET_BIT);
+        ch943x_port_write(port, CH943X_FCR_REG, CH943X_FCR_FIFO_BIT);
+    } else {
+        ch943x_fcr_update(s, port->line, CH943X_FCR_RXRESET_BIT | CH943X_FCR_TXRESET_BIT | CH943X_FCR_FIFO_BIT);
+    }
 
     /* Enable RX, TX, CTS change interrupts */
     val = CH943X_IER_RDI_BIT | CH943X_IER_RLSI_BIT | CH943X_IER_MSI_BIT;
     ch943x_port_write(port, CH943X_IER_REG, val);
 
-    /* Enable Uart interrupts */
-    ch943x_port_write(port, CH943X_MCR_REG, CH943X_MCR_OUT2);
+    msleep(20);
+    atomic_set(&one->isopen, 1);
     one->mcr_force = CH943X_MCR_OUT2;
 
     return 0;
@@ -688,15 +690,24 @@ static void ch943x_shutdown(struct uart_port *port)
 {
     struct ch943x *s = dev_get_drvdata(port->dev);
     struct ch943x_one *one = to_ch943x_one(port, port);
-    DRV_DEBUG(s->dev, "%s\n", __func__);
+    unsigned long timeout;
 
+    DRV_DEBUG(s->dev, "%s u%d\n", __func__, port->line);
+
+    timeout = jiffies + HZ * 3;
     while (one->txfifo_empty_flag) {
         msleep(2);
+        if (time_after(jiffies, timeout)) {
+            break;
+        }
         continue;
     }
 
     /* Disable all interrupts */
     ch943x_port_write(port, CH943X_IER_REG, 0);
+    if ((s->chip.chiptype != CHIP_CH9434A) || (s->chip.chiptype != CHIP_CH9434M)) {
+        ch943x_port_write(port, CH943X_FCR_REG, 0);
+    }
     ch943x_port_write(port, CH943X_MCR_REG, 0);
 
     one->mcr_force = 0;
@@ -734,7 +745,7 @@ static void ch943x_pm(struct uart_port *port, u32 state, u32 oldstate)
 {
     struct ch943x *s = dev_get_drvdata(port->dev);
 
-    DRV_DEBUG(s->dev, "%s\n", __func__);
+    DRV_DEBUG(s->dev, "%s u%d\n", __func__, port->line);
 }
 
 static void ch943x_null_void(struct uart_port *port)
@@ -780,6 +791,7 @@ int ch943x_register_uart_driver(struct ch943x *s)
 #else
     s->uart.dev_name = "ttyCH943X";
 #endif
+    s->uart.driver_name = "ch943x_uart";
     s->uart.nr = s->chip.nr_uart;
     ret = uart_register_driver(&s->uart);
     if (ret) {
@@ -789,23 +801,6 @@ int ch943x_register_uart_driver(struct ch943x *s)
 
     return 0;
 }
-
-#if 0
-/* Enable or disable the RS485 support */
-static int ch943x_config_rs485(struct uart_port *port, struct serial_rs485 *rs485)
-{
-    struct ch943x_one *one = to_ch943x_one(port, port);
-    struct ch943x *s = dev_get_drvdata(one->port.dev);
-
-    DRV_DEBUG(port->dev, "%s u%d flags:0x%x\n", __func__, port->line, rs485->flags);
-
-    if (rs485->flags & SER_RS485_ENABLED) {
-    } else {
-    }
-    port->rs485 = *rs485;
-    return 0;
-}
-#endif
 
 int ch943x_register_uart_port(struct ch943x *s)
 {
@@ -824,7 +819,7 @@ int ch943x_register_uart_port(struct ch943x *s)
     }
 
     for (i = 0; i < s->chip.nr_uart; i++) {
-        if ((s->chip.chiptype == CHIP_CH9437) && IS_USE_SERIAL_MODE && (i == 0))
+        if ((s->chip.chiptype == CHIP_CH9437F) && IS_USE_SERIAL_MODE && (i == 0))
             continue;
         p = s->p + i;
         /* Initialize port data */
@@ -853,9 +848,11 @@ int ch943x_register_uart_port(struct ch943x *s)
         atomic_set(&p->isopen, 0);
         /* Disable all interrupts */
         ch943x_port_write(&p->port, CH943X_IER_REG, 0);
-
         /* Disable uart interrupts */
         ch943x_port_write(&p->port, CH943X_MCR_REG, 0);
+        if ((s->chip.chiptype != CHIP_CH9434A) || (s->chip.chiptype != CHIP_CH9434M)) {
+            ch943x_port_write(&p->port, CH943X_FCR_REG, 0);
+        }
 
         p->msr_reg = ch943x_port_read(&p->port, CH943X_MSR_REG);
 
@@ -877,13 +874,13 @@ int ch943x_register_uart_port(struct ch943x *s)
     }
 
     for (i = 0; i < s->chip.nr_uart; i++) {
-        if (s->chip.chiptype == CHIP_CH9437 && IS_USE_SERIAL_MODE && i == 0)
+        if ((s->chip.chiptype == CHIP_CH9437F) && IS_USE_SERIAL_MODE && (i == 0))
             continue;
 
         p = s->p + i;
-        if (s->chip.chiptype == CHIP_CH9434D || s->chip.chiptype == CHIP_CH9432)
+        if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D))
             p->port.uartclk = 96000000;
-        else if (s->chip.chiptype == CHIP_CH9438 || s->chip.chiptype == CHIP_CH9437)
+        else if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F))
             p->port.uartclk = 192000000;
         else
             p->port.uartclk = 32 * 1000000 * 15 / 13;
@@ -891,28 +888,16 @@ int ch943x_register_uart_port(struct ch943x *s)
 
     /* TNOW function enable */
     if ((s->chip.chiptype == CHIP_CH9434A) || (s->chip.chiptype == CHIP_CH9434M) ||
-        (s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432)) {
+        (s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D)) {
         for (i = 0; i < s->chip.nr_uart; i++) {
-#ifdef MULTI_CHIP_MODE
-            if (s->chip.chiptype == CHIP_CH9434D) {
-                if (i == 3 && s->extern_clock_on)
-                    continue;
-                if ((i == 0 || i == 1) && s->can_on)
-                    continue;
-            }
-#else
             if (s->chip.chiptype == CHIP_CH9434D) {
                 if (i == 3 && CH943X_EXCLK_ENABLE)
                     continue;
                 if ((i == 0 || i == 1) && s->can_on)
                     continue;
             }
-#endif
-#ifdef MULTI_CHIP_MODE
+
             if (s->tnow_enable_bits & BIT(i)) {
-#else
-            if (CH943X_TNOW_ENABLE(i)) {
-#endif
                 p = s->p + i;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0))
                 p->port.rs485.flags |= SER_RS485_ENABLED;
@@ -921,22 +906,15 @@ int ch943x_register_uart_port(struct ch943x *s)
             }
         }
         ch943x_reg_write(s, CH943X_RS485_CTRL1_REG | CH943X_REG_OP_WRITE, 1, &s->reg485);
-    } else if (s->chip.chiptype == CHIP_CH9438) {
+    } else if (s->chip.chiptype == CHIP_CH9438F) {
         for (i = 0; i < s->chip.nr_uart; i++) {
             if (i == 1)
                 continue;
-#ifdef MULTI_CHIP_MODE
             if (i == 7 && s->extern_clock_on) {
-#else
-            if (i == 7 && CH943X_EXCLK_ENABLE) {
-#endif
                 continue;
             }
-#ifdef MULTI_CHIP_MODE
+
             if (s->tnow_enable_bits & BIT(i)) {
-#else
-            if (CH943X_TNOW_ENABLE(i)) {
-#endif
                 p = s->p + i;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0))
                 p->port.rs485.flags |= SER_RS485_ENABLED;
@@ -948,17 +926,14 @@ int ch943x_register_uart_port(struct ch943x *s)
         ctrl2_data = (s->reg485 >> 4) & 0x0f;
         ch943x_reg_write(s, CH943X_RS485_CTRL1_REG | CH943X_REG_OP_WRITE, 1, &ctrl1_data);
         ch943x_reg_write(s, CH943X_RS485_CTRL2_REG | CH943X_REG_OP_WRITE, 1, &ctrl2_data);
-    } else if (s->chip.chiptype == CHIP_CH9437) {
+    } else if (s->chip.chiptype == CHIP_CH9437F) {
         for (i = 0; i < s->chip.nr_uart; i++) {
             if ((i == 0) && (s->chip.interface_mode == SERIAL_MODE))
                 continue;
             if (i == 7)
                 continue;
-#ifdef MULTI_CHIP_MODE
+
             if (s->tnow_enable_bits & BIT(i)) {
-#else
-            if (CH943X_TNOW_ENABLE(i)) {
-#endif
                 p = s->p + i;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0))
                 p->port.rs485.flags |= SER_RS485_ENABLED;
@@ -993,7 +968,7 @@ void ch943x_uart_remove(struct ch943x *s)
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
     for (i = 0; i < s->uart.nr; i++) {
-        if (s->chip.chiptype == CHIP_CH9437 && IS_USE_SERIAL_MODE && i == 0)
+        if (s->chip.chiptype == CHIP_CH9437F && IS_USE_SERIAL_MODE && i == 0)
             continue;
 
         p = s->p + i;
