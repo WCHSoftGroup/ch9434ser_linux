@@ -113,10 +113,12 @@ irqreturn_t ch943x_ist(int irq, void *dev_id)
     DRV_DEBUG(s->dev, "%s interrupt enter...\n", __func__);
 
     if ((s->chip.chiptype == CHIP_CH9438F) || ((s->chip.chiptype == CHIP_CH9437F) && IS_USE_SERIAL_MODE) ||
-        ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_SPI_MODE) ||
+        ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_SPI_MODE && ((s->chip.ver[1] == 1) && (s->chip.ver[0] == 1))) ||
         ((s->chip.chiptype == CHIP_CH9432D) && IS_USE_SPI_MODE)) {
         ch943x_port_irq_bulkmode(s);
-    } else if ((s->chip.chiptype == CHIP_CH9434A) || (s->chip.chiptype == CHIP_CH9434M)) {
+    } else if ((s->chip.chiptype == CHIP_CH9434A) || (s->chip.chiptype == CHIP_CH9434M) ||
+               ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_SPI_MODE &&
+                ((s->chip.ver[1] == 1) && (s->chip.ver[0] == 0)))) {
         for (i = 0; i < s->uart.nr; ++i) {
             if (atomic_read(&s->p[i].isopen) == 1) {
                 ch943x_port_irq(s, i);
