@@ -1,4 +1,4 @@
-## CH943X Linux驱动程序和GPIO接口库使用说明
+## CH9434SER Linux驱动程序和GPIO接口库使用说明
 
 此资料包包含以下部分：Linux系统SPI/I2C/UART控制接口转SERIAL/CAN/GPIO设备驱动程序、GPIO应用库与演示程序。
 适用于如下芯片的接口扩展功能：
@@ -129,7 +129,7 @@ export  ARCH  CROSS_COMPILE
 
 DRIVERNAME := ch943x-module
 obj-m := $(DRIVERNAME).o
-$(DRIVERNAME)-y := ch943x.o ch943x_ctrl.o ch943x_uart.o ch943x_can.o
+$(DRIVERNAME)-y := ch943x_core.o ch943x_comm.o ch943x_uart.o ch943x_can.o
 
 all:
 	$(MAKE) EXTRA_CFLAGS=-fno-pic -C $(KERNEL_DIR) M=$(CURDIR) modules
@@ -444,17 +444,7 @@ can0  06A5EE64   [8]  71 5B 50 76 55 C2 22 63
 
 ## 5 CH432驱动适配方法
 
-该驱动程序兼容CH432芯片（SPI转2路串口），使用前须在ch943x_cfg.h文件中声明USE_CHIP_CH432宏，示例：
-
-```c
-/* enable or disable the output of debug information (read/write registers) */
-#define ENABLE_DRIVER_DEBUG 0
-/* enable or disable the output of more detailed debugging information */
-#define ENAVLE_DRIVER_VERBOSEDEGUG 0
-
-#define USE_CHIP_CH432
-...
-```
+该驱动程序兼容CH432芯片（SPI转2路串口），仅编译ch432_uart.c文件即可。
 
 Makefile示例：
 
@@ -464,9 +454,9 @@ ARCH=xxx
 CROSS_COMPILE=xxx # 指定交叉编译工具链
 export  ARCH  CROSS_COMPILE
 
-DRIVERNAME := ch943x-module
+DRIVERNAME := ch432-module
 obj-m := $(DRIVERNAME).o
-$(DRIVERNAME)-y := ch943x.o ch43x_uart.o # 仅编译ch943x.c和ch43x_uart.c
+$(DRIVERNAME)-y := ch432_uart.o
 
 all:
 	$(MAKE) EXTRA_CFLAGS=-fno-pic -C $(KERNEL_DIR) M=$(CURDIR) modules
