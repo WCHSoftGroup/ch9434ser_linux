@@ -705,7 +705,8 @@ static void ch943x_shutdown(struct uart_port *port)
 
     /* Disable all interrupts */
     ch943x_port_write(port, CH943X_IER_REG, 0);
-    if ((s->chip.chiptype != CHIP_CH9434A) || (s->chip.chiptype != CHIP_CH9434M)) {
+    if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D) ||
+        (s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F)) {
         ch943x_port_write(port, CH943X_FCR_REG, 0);
     }
     ch943x_port_write(port, CH943X_MCR_REG, 0);
@@ -784,14 +785,17 @@ int ch943x_register_uart_driver(struct ch943x *s)
 #ifdef MULTI_CHIP_MODE
     const char *ch943x_uart_name[] = {"ttyCH943XA", "ttyCH943XB", "ttyCH943XC", "ttyCH943XD",
                                       "ttyCH943XE", "ttyCH943XF", "ttyCH943XG", "ttyCH943XH"};
+    const char *ch943x_driver_name[] = {"ch943x_uartA", "ch943x_uartB", "ch943x_uartC", "ch943x_uartD", 
+                                        "ch943x_uartE", "ch943x_uartF", "ch943x_uartG", "ch943x_uartH"};
 #endif
     s->uart.owner = THIS_MODULE;
 #ifdef MULTI_CHIP_MODE
     s->uart.dev_name = ch943x_uart_name[s->minor];
+    s->uart.driver_name = ch943x_driver_name[s->minor];
 #else
     s->uart.dev_name = "ttyCH943X";
-#endif
     s->uart.driver_name = "ch943x_uart";
+#endif
     s->uart.nr = s->chip.nr_uart;
     ret = uart_register_driver(&s->uart);
     if (ret) {
