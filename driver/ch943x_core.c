@@ -21,6 +21,10 @@
  * V1.5 - add support for CH9438F/CH9437F/CH9432F
  * V1.6 - modify uart driver's log output format
  *        modify the names of some files
+ * V1.7 - abstract SPI/I2C/serial bus operations
+ *        add GPIO sysfs interface support
+ *        modify driver debug/log output mechanism
+ *        improve resource management and error handling paths
  */
 
 #include "ch943x.h"
@@ -39,6 +43,53 @@ static dev_t devt;
 static int ch943x_major = 0x00;
 
 static DEFINE_MUTEX(ch943x_minors_lock);
+
+int drv_debug_enable = 0;
+module_param(drv_debug_enable, int, 0644);
+MODULE_PARM_DESC(drv_debug_enable, "Enable driver debug output (0=off, 1=on)");
+
+const int ch943x_tnow_enable[8] = {
+#ifdef CH943X_TNOW0_ON
+    1,
+#else
+    0,
+#endif
+#ifdef CH943X_TNOW1_ON
+    1,
+#else
+    0,
+#endif
+#ifdef CH943X_TNOW2_ON
+    1,
+#else
+    0,
+#endif
+#ifdef CH943X_TNOW3_ON
+    1,
+#else
+    0,
+#endif
+#ifdef CH943X_TNOW4_ON
+    1,
+#else
+    0,
+#endif
+#ifdef CH943X_TNOW5_ON
+    1,
+#else
+    0,
+#endif
+#ifdef CH943X_TNOW6_ON
+    1,
+#else
+    0,
+#endif
+#ifdef CH943X_TNOW7_ON
+    1,
+#else
+    0,
+#endif
+};
 
 static struct ch943x *ch943x_get_by_index(unsigned int index)
 {
@@ -64,6 +115,9 @@ static int ch943x_alloc_minor(struct ch943x *ch943x)
     }
     mutex_unlock(&ch943x_minors_lock);
 
+    if (minor >= CH943X_MAX_CNT)
+        return -ENOSR;
+
     return minor;
 }
 
@@ -78,6 +132,9 @@ static int ch943x_io_open(struct inode *inode, struct file *fp)
 {
     unsigned int minor = iminor(inode);
     struct ch943x *s = ch943x_get_by_index(minor);
+
+    if (!s)
+        return -ENODEV;
 
     fp->private_data = s;
 
@@ -94,16 +151,23 @@ static int ch943x_io_release(struct inode *inode, struct file *fp)
 static long ch943x_io_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     struct ch943x *s = file->private_data;
+    int ret;
 
-    return __ch943x_io_ioctl(s, cmd, arg);
+    ret = ch943x_ioctl_do(s, cmd, arg);
+    if (ret < 0) {
+        dev_err(s->dev, "ch943x_ioctl_do failed. cmd:%u arg:%lu ret:%d\n", cmd, arg, ret);
+        return ret;
+    }
+
+    return 0;
 }
 
-irqreturn_t ch943x_ist_top(int irq, void *dev_id)
+static irqreturn_t ch943x_ist_top(int irq, void *dev_id)
 {
     return IRQ_WAKE_THREAD;
 }
 
-irqreturn_t ch943x_ist(int irq, void *dev_id)
+static irqreturn_t ch943x_ist(int irq, void *dev_id)
 {
     struct ch943x *s = (struct ch943x *)dev_id;
     int i;
@@ -114,20 +178,9 @@ irqreturn_t ch943x_ist(int irq, void *dev_id)
         ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_SPI_MODE && ((s->chip.ver[1] == 1) && (s->chip.ver[0] == 1))) ||
         ((s->chip.chiptype == CHIP_CH9432D) && IS_USE_SPI_MODE)) {
         ch943x_port_irq_bulkmode(s);
-    } else if ((s->chip.chiptype == CHIP_CH9434A) || (s->chip.chiptype == CHIP_CH9434M) ||
-               ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_SPI_MODE &&
-                ((s->chip.ver[1] == 1) && (s->chip.ver[0] == 0)))) {
-        for (i = 0; i < s->uart.nr; ++i) {
-            if (atomic_read(&s->p[i].isopen) == 1) {
-                ch943x_port_irq(s, i);
-            }
-        }
-    } else if (((s->chip.chiptype == CHIP_CH9437F) && IS_USE_I2C_MODE) ||
-               ((s->chip.chiptype == CHIP_CH9434D) && IS_USE_I2C_MODE) ||
-               ((s->chip.chiptype == CHIP_CH9432D) && IS_USE_I2C_MODE)) {
-        for (i = 0; i < s->uart.nr; ++i) {
+    } else {
+        for (i = 0; i < s->uart.nr; ++i)
             ch943x_port_irq(s, i);
-        }
     }
 
 #ifdef CH9434D_CAN_ON
@@ -139,7 +192,6 @@ irqreturn_t ch943x_ist(int irq, void *dev_id)
 #endif
 
     DRV_DEBUG(s->dev, "%s end\n", __func__);
-
     return IRQ_HANDLED;
 }
 
@@ -154,18 +206,18 @@ static int ch943x_clock_init(struct ch943x *s)
         s->chip.chiptype == CHIP_CH9437F) {
         if (s->extern_clock_on) {
             data = 0x03 << 6;
-            ret = ch943x_reg_write(s, CH943X_CLK_REG | CH943X_REG_OP_WRITE, 1, &data);
+            ret = ch943x_reg_write(s, CH943X_CLK_REG, 1, &data);
             if (ret < 0)
                 return ret;
         } else {
             data = 0;
-            ret = ch943x_reg_write(s, CH943X_CLK_REG | CH943X_REG_OP_WRITE, 1, &data);
+            ret = ch943x_reg_write(s, CH943X_CLK_REG, 1, &data);
             if (ret < 0)
                 return ret;
         }
     } else {
         data = CH943X_CLK_EXT_BIT | CH943X_CLK_PLL_BIT | 13;
-        ret = ch943x_reg_write(s, CH943X_CLK_REG | CH943X_REG_OP_WRITE, 1, &data);
+        ret = ch943x_reg_write(s, CH943X_CLK_REG, 1, &data);
         if (ret < 0)
             return ret;
     }
@@ -183,32 +235,24 @@ static int ch943x_hw_test(struct ch943x *s)
 
     for (i = 0; i < 2; i++) {
         data = 0x55;
-        ret = ch943x_reg_write(s, (CH943X_SPR_REG + (i * 0x10)) | CH943X_REG_OP_WRITE, 1, &data);
+        ret = ch943x_reg_write(s, (CH943X_SPR_REG + (i * 0x10)), 1, &data);
         if (ret < 0)
             return ret;
-
         ret = ch943x_reg_read(s, CH943X_SPR_REG + (i * 0x10), 1, &val);
         if (ret < 0)
             return ret;
-        if (val != 0x55) {
-            dev_err(s->dev, "%s Failed. tx:%02x %02x, tx:%02x rx:%02x\n", __func__,
-                    (CH943X_SPR_REG + (i * 0x10)) | CH943X_REG_OP_WRITE, data, CH943X_SPR_REG + (i * 0x10), val);
-            return -1;
-        }
+        if (val != data)
+            return -EIO;
 
         data = 0xAA;
-        ret = ch943x_reg_write(s, (CH943X_SPR_REG + (i * 0x10)) | CH943X_REG_OP_WRITE, 1, &data);
+        ret = ch943x_reg_write(s, (CH943X_SPR_REG + (i * 0x10)), 1, &data);
         if (ret < 0)
             return ret;
         ret = ch943x_reg_read(s, CH943X_SPR_REG + (i * 0x10), 1, &val);
         if (ret < 0)
             return ret;
-
-        if (val != 0xAA) {
-            dev_err(s->dev, "%s Failed. tx:%02x %02x, tx:%02x rx:%02x\n", __func__,
-                    (CH943X_SPR_REG + (i * 0x10)) | CH943X_REG_OP_WRITE, data, CH943X_SPR_REG + (i * 0x10), val);
-            return -1;
-        }
+        if (val != data)
+            return -EIO;
     }
     return 0;
 }
@@ -239,12 +283,14 @@ static int ctrluart_init(struct ch943x *s)
     s->fp = filp_open(s->ctrluart_path, O_RDWR, 0);
     if (IS_ERR(s->fp)) {
         dev_err(s->dev, "uart %s open failed!\n", s->ctrluart_path);
-        return -1;
+        ret = PTR_ERR(s->fp);
+        return ret;
     }
 #else
     s->fp = filp_open(CTRLUART_PATH, O_RDWR, 0);
     if (IS_ERR(s->fp)) {
-        return -1;
+        ret = PTR_ERR(s->fp);
+        return ret;
     }
 #endif /* MULTI_CHIP_MODE */
 
@@ -268,7 +314,7 @@ static int ctrluart_init(struct ch943x *s)
     data = 0x55;
     ret = ch943x_ctrl_tty_write(s, 1, &data);
     if (ret < 0)
-        return ret;
+        goto out;
 
     mdelay(100);
 
@@ -277,16 +323,18 @@ static int ctrluart_init(struct ch943x *s)
 out:
 #endif
     filp_close(s->fp, NULL);
-    return -1;
+    return ret;
 }
 #endif
 
-static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
+static int ch943x_probe(struct device *dev, int irq)
 {
     int ret, i;
     struct ch943x *s;
     struct ch943x_one *p;
     struct device *class_dev = NULL;
+
+    DRV_DEBUG(dev, "%s irq:%d\n", __func__, irq);
 
     /* Alloc port structure */
     s = devm_kzalloc(dev, sizeof(*s), GFP_KERNEL);
@@ -296,17 +344,22 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
     }
     dev_set_drvdata(dev, s);
 
+    s->dev = dev;
     s->minor = ch943x_alloc_minor(s);
-    if (s->minor >= CH943X_MAX_CNT)
-        return -ENOMEM;
+    if (s->minor < 0) {
+        dev_err(dev, "Failed to allocate minor: %d\n", s->minor);
+        return s->minor;
+    }
 
     s->irq = irq;
     s->reg485 = 0x00;
-    s->dev = dev;
-    s->local_buf = kmalloc(4096, GFP_KERNEL);
+    s->local_buf = devm_kmalloc(dev, 4096, GFP_KERNEL);
     if (!s->local_buf) {
-        return -ENOMEM;
+        ret = -ENOMEM;
+        goto release_minor;
     }
+    s->ops = &ch943x_bus_ops;
+
 #ifdef USE_SPI_MODE
     s->spi_dev = to_spi_device(dev);
     s->chip.interface_mode = SPI_MODE;
@@ -319,7 +372,7 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
     ret = ctrluart_init(s);
     if (ret < 0) {
         dev_err(s->dev, "ctrluart init Failed.\n");
-        return -1;
+        goto out1;
     }
 #endif
     mutex_init(&s->mutex);
@@ -336,35 +389,19 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
         dev_err(dev, "ch943x get chip version Failed.\n");
         goto out1;
     }
-    if (s->chip.chiptype == CHIP_CH9438F) {
-        s->chip.nr_uart = 8;
-        s->chip.nr_gpio = 8;
-    } else if (s->chip.chiptype == CHIP_CH9437F) {
-        s->chip.nr_uart = 8;
-        s->chip.nr_gpio = 11;
-    } else if (s->chip.chiptype == CHIP_CH9432D) {
-        s->chip.nr_uart = 2;
-        s->chip.nr_gpio = 8;
-    } else if (s->chip.chiptype == CHIP_CH9434D) {
-        s->chip.nr_uart = 4;
-        s->chip.nr_gpio = 4;
-    } else if ((s->chip.chiptype == CHIP_CH9434A) || (s->chip.chiptype == CHIP_CH9434M)) {
-        s->chip.nr_uart = 4;
-        s->chip.nr_gpio = 25;
-    }
 
     /* CH9434D/CH9438/CH9437/CH9432 IO enable */
     ret = ch943x_io_enable(s);
     if (ret < 0) {
         dev_err(s->dev, "ch943x enable io Failed.\n");
-        return -1;
+        goto out1;
     }
 
     /* Init Clock */
     ret = ch943x_clock_init(s);
     if (ret < 0) {
         dev_err(s->dev, "ch943x init clock Failed.\n");
-        return -1;
+        goto out1;
     }
 
     /* Register UART driver */
@@ -391,17 +428,24 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
     }
 #endif
 
-    ret = devm_request_threaded_irq(dev, irq, ch943x_ist_top, ch943x_ist, IRQF_ONESHOT | flags, dev_name(dev), s);
-    if (ret != 0) {
-        dev_err(dev, "irq %d request failed, error %d\n", irq, ret);
+    ret = ch943x_gpio_register(s);
+    if (ret < 0) {
+        dev_err(dev, "ch943x gpio probe Failed.\n");
         goto out4;
     }
-    DRV_DEBUG(dev, "%s - request irq:%d result:%d\n", __func__, irq, ret);
+
+    ret = devm_request_threaded_irq(dev, irq, ch943x_ist_top, ch943x_ist, IRQF_ONESHOT | IRQF_TRIGGER_LOW,
+                                    dev_name(dev), s);
+    if (ret != 0) {
+        dev_err(dev, "irq %d request failed, error %d\n", irq, ret);
+        goto out5;
+    }
 
     class_dev = device_create(ch943x_io_class, s->dev, MKDEV(MAJOR(devt), s->minor), s, "ch943x_iodev%d", s->minor);
     if (IS_ERR(class_dev)) {
-        dev_err(class_dev, "Could not create device node.\n");
-        goto out4;
+        ret = PTR_ERR(class_dev);
+        dev_err(s->dev, "Could not create device node: %d\n", ret);
+        goto out5;
     }
     dev_info(s->dev, "ch943x_iodev%d: character device\n", s->minor);
 
@@ -409,6 +453,8 @@ static int ch943x_probe(struct device *dev, int irq, unsigned long flags)
 
     return 0;
 
+out5:
+    ch943x_gpio_remove(s);
 out4:
 #ifdef CH9434D_CAN_ON
     if ((s->chip.chiptype == CHIP_CH9434D) && s->can_on) {
@@ -433,9 +479,10 @@ out2:
 out1:
     mutex_destroy(&s->mutex);
     mutex_destroy(&s->mutex_bus_access);
-    kfree(s->local_buf);
+release_minor:
+    ch943x_release_minor(s);
 
-    return -1;
+    return ret;
 }
 
 static int ch943x_remove(struct device *dev)
@@ -444,6 +491,11 @@ static int ch943x_remove(struct device *dev)
 
     DRV_DEBUG(dev, "%s\n", __func__);
 
+    /*
+     * Release interrupt first to ensure no IRQ thread is running
+     * while we tear down UART ports and other resources below.
+     * This MUST come before any other cleanup.
+     */
     devm_free_irq(dev, s->irq, s);
 
     ch943x_uart_remove(s);
@@ -453,6 +505,8 @@ static int ch943x_remove(struct device *dev)
     }
 #endif
 
+    ch943x_gpio_remove(s);
+
 #ifdef USE_SERIAL_MODE
     if (s->chip.chiptype == CHIP_CH9437F && IS_USE_SERIAL_MODE)
         filp_close(s->fp, NULL);
@@ -460,7 +514,6 @@ static int ch943x_remove(struct device *dev)
     mutex_destroy(&s->mutex);
     mutex_destroy(&s->mutex_bus_access);
     ch943x_debugfs_exit(s);
-    kfree(s->local_buf);
 
     device_destroy(ch943x_io_class, MKDEV(MAJOR(devt), s->minor));
     ch943x_release_minor(s);
@@ -470,8 +523,8 @@ static int ch943x_remove(struct device *dev)
 
 static const struct of_device_id __maybe_unused ch943x_dt_ids[] = {
     {
-        .compatible = "wch,ch943x",
-    },
+     .compatible = "wch,ch943x",
+     },
     {},
 };
 MODULE_DEVICE_TABLE(of, ch943x_dt_ids);
@@ -479,7 +532,6 @@ MODULE_DEVICE_TABLE(of, ch943x_dt_ids);
 #ifdef USE_SPI_MODE
 static int ch943x_spi_probe(struct spi_device *spi)
 {
-    unsigned long flags = IRQF_TRIGGER_LOW;
     struct device *dev = &spi->dev;
     int ret;
 
@@ -492,8 +544,7 @@ static int ch943x_spi_probe(struct spi_device *spi)
 
 #ifdef USE_IRQ_FROM_DTS
     /* if your platform supports acquire irq number from dts */
-    DRV_DEBUG(dev, "spi->irq:%d\n", spi->irq);
-    ret = ch943x_probe(dev, spi->irq, flags);
+    ret = ch943x_probe(dev, spi->irq);
     if (ret) {
         dev_err(dev, "ch943x_probe error\n");
         goto out;
@@ -510,9 +561,8 @@ static int ch943x_spi_probe(struct spi_device *spi)
         dev_err(dev, "Failed set gpio direction\n");
         goto out;
     }
-    irq_set_irq_type(gpio_to_irq(GPIO_NUMBER), flags);
 
-    ret = ch943x_probe(dev, gpio_to_irq(GPIO_NUMBER), flags);
+    ret = ch943x_probe(dev, gpio_to_irq(GPIO_NUMBER));
     if (ret) {
         dev_err(dev, "ch943x_probe error\n");
         goto out;
@@ -530,19 +580,16 @@ static int ch943x_i2c_probe(struct i2c_client *i2c)
 static int ch943x_i2c_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
 #endif
 {
-    unsigned long flags = IRQF_TRIGGER_LOW;
     struct device *dev = &i2c->dev;
     int ret;
 
 #ifdef USE_IRQ_FROM_DTS
-    DRV_DEBUG(dev, "i2c->irq:%d\n", i2c->irq);
-    ret = ch943x_probe(dev, i2c->irq, flags);
+    ret = ch943x_probe(dev, i2c->irq);
     if (ret) {
         dev_err(dev, "ch943x_probe error\n");
         goto out;
     }
 #else
-    DRV_DEBUG(dev, "gpio_to_irq:%d\n", gpio_to_irq(GPIO_NUMBER));
     ret = devm_gpio_request(dev, GPIO_NUMBER, "gpioint");
     if (ret) {
         dev_err(dev, "Failed request gpio:%d\n", GPIO_NUMBER);
@@ -553,9 +600,8 @@ static int ch943x_i2c_probe(struct i2c_client *i2c, const struct i2c_device_id *
         dev_err(dev, "Failed set gpio direction\n");
         goto out;
     }
-    irq_set_irq_type(gpio_to_irq(GPIO_NUMBER), flags);
 
-    ret = ch943x_probe(dev, gpio_to_irq(GPIO_NUMBER), flags);
+    ret = ch943x_probe(dev, gpio_to_irq(GPIO_NUMBER));
     if (ret) {
         dev_err(dev, "ch943x_probe error\n");
         goto out;
@@ -569,7 +615,6 @@ out:
 #ifdef USE_SERIAL_MODE
 static int ch943x_platform_probe(struct platform_device *pdev)
 {
-    unsigned long flags = IRQF_TRIGGER_LOW;
     struct device *dev = &pdev->dev;
     int ret;
 #ifdef MULTI_CHIP_MODE
@@ -578,14 +623,14 @@ static int ch943x_platform_probe(struct platform_device *pdev)
 
 #ifdef USE_IRQ_FROM_DTS
     int irq;
-    DRV_DEBUG(dev, "irq:%d\n", irq);
 
     irq = platform_get_irq(pdev, 0);
     if (irq < 0) {
         dev_err(dev, "Failed to get IRQ: %d\n", irq);
         return irq;
     }
-    ret = ch943x_probe(dev, irq, flags);
+    DRV_DEBUG(dev, "irq:%d\n", irq);
+    ret = ch943x_probe(dev, irq);
     if (ret) {
         dev_err(dev, "ch943x_probe error\n");
         goto out;
@@ -617,9 +662,8 @@ static int ch943x_platform_probe(struct platform_device *pdev)
         dev_err(dev, "Failed set gpio direction\n");
         goto out;
     }
-    irq_set_irq_type(gpio_to_irq(gpio_number), flags);
 
-    ret = ch943x_probe(dev, gpio_to_irq(gpio_number), flags);
+    ret = ch943x_probe(dev, gpio_to_irq(gpio_number));
     if (ret) {
         dev_err(dev, "ch943x_probe error\n");
         goto out;
@@ -636,9 +680,8 @@ static int ch943x_platform_probe(struct platform_device *pdev)
         dev_err(dev, "Failed set gpio direction\n");
         goto out;
     }
-    irq_set_irq_type(gpio_to_irq(GPIO_NUMBER), flags);
 
-    ret = ch943x_probe(dev, gpio_to_irq(GPIO_NUMBER), flags);
+    ret = ch943x_probe(dev, gpio_to_irq(GPIO_NUMBER));
     if (ret) {
         dev_err(dev, "ch943x_probe error\n");
         goto out;
@@ -686,15 +729,13 @@ static int ch943x_platform_remove(struct platform_device *pdev)
 
 static int ch943x_suspend(struct device *dev)
 {
-    dev_info(dev, "%s", __func__);
-    /* do nothing */
+    dev_info(dev, "%s\n", __func__);
     return 0;
 }
 
 static int ch943x_resume(struct device *dev)
 {
-    dev_info(dev, "%s", __func__);
-    /* do nothing */
+    dev_info(dev, "%s\n", __func__);
     return 0;
 }
 
@@ -702,7 +743,6 @@ static struct dev_pm_ops ch943x_pm_ops = {
     .suspend = ch943x_suspend,
     .resume = ch943x_resume,
 };
-
 
 #ifdef USE_SPI_MODE
 static struct spi_driver ch943x_spi_driver = {
@@ -720,10 +760,10 @@ MODULE_ALIAS("spi:ch943x");
 #elif defined(USE_I2C_MODE)
 static struct i2c_driver ch943x_i2c_driver = {
     .driver = {
-        .name = "ch943x",
-        .owner = THIS_MODULE,
-        .of_match_table = of_match_ptr(ch943x_dt_ids),
-        .pm = &ch943x_pm_ops,
+       .name = "ch943x",
+       .owner = THIS_MODULE,
+       .of_match_table = of_match_ptr(ch943x_dt_ids),
+       .pm = &ch943x_pm_ops,
     },
     .probe = ch943x_i2c_probe,
     .remove = ch943x_i2c_remove,
@@ -752,8 +792,8 @@ static const struct file_operations ch943x_io_fops = {
 static int __init ch943x_init(void)
 {
     int ret = 0;
-    printk(KERN_INFO KBUILD_MODNAME ": " DRIVER_DESC "\n");
-    printk(KERN_INFO KBUILD_MODNAME ": " VERSION_DESC "\n");
+    pr_info(KBUILD_MODNAME ": " DRIVER_DESC "\n");
+    pr_info(KBUILD_MODNAME ": " VERSION_DESC "\n");
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0))
     ch943x_io_class = class_create(THIS_MODULE, "ch943x_io_class");
@@ -775,13 +815,19 @@ static int __init ch943x_init(void)
         goto unregister_chrdev;
 
 #ifdef USE_SPI_MODE
-    return spi_register_driver(&ch943x_spi_driver);
+    ret = spi_register_driver(&ch943x_spi_driver);
 #elif defined(USE_I2C_MODE)
-    return i2c_add_driver(&ch943x_i2c_driver);
+    ret = i2c_add_driver(&ch943x_i2c_driver);
 #elif defined(USE_SERIAL_MODE)
-    return platform_driver_register(&ch943x_platform_driver);
+    ret = platform_driver_register(&ch943x_platform_driver);
 #endif
+    if (ret)
+        goto cdev_del;
 
+    return 0;
+
+cdev_del:
+    cdev_del(&ch943x_cdev);
 unregister_chrdev:
     unregister_chrdev_region(MKDEV(ch943x_major, 0), CH943X_MAX_CNT);
 destroy_class:
@@ -792,7 +838,7 @@ destroy_class:
 
 static void __exit ch943x_exit(void)
 {
-    printk(KERN_INFO KBUILD_MODNAME ": ch943x driver exit.\n");
+    pr_info(KBUILD_MODNAME ": ch943x driver exit.\n");
 
 #ifdef USE_SPI_MODE
     spi_unregister_driver(&ch943x_spi_driver);

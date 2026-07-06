@@ -148,8 +148,13 @@ static u8 ch943x_handle_can_tx_contmode(struct ch943x *s, struct can_frame *fram
     else
         txinfo[0].txmir = ((sid << 21) | (rtr << 1)) | CAN_TXMIRx_TXRQ;
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0))
+    txinfo[0].txmdt = (frame->len & 0x0000000F);
+    memcpy(data, frame->data, frame->len);
+#else
     txinfo[0].txmdt = (frame->can_dlc & 0x0000000F);
     memcpy(data, frame->data, frame->can_dlc);
+#endif
     txinfo[0].txmdl = (data[3] << 24) | (data[2] << 16) | (data[1] << 8) | (data[0]);
     txinfo[0].txmdh = (data[7] << 24) | (data[6] << 16) | (data[5] << 8) | (data[4]);
 
@@ -201,14 +206,25 @@ static u8 ch943x_handle_can_tx(struct ch943x *s, struct can_frame *frame, int id
     ch943x_canreg_write(s, CH9434D_CAN_TXMIR0 + tx_mailbox * 4, reg_val);
 
     reg_val = ch943x_canreg_read(s, CH9434D_CAN_TXMDTR0 + tx_mailbox * 4);
+    reg_val &= ~0x0000000F;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0))
+    reg_val |= (frame->len & 0x0000000F);
+#else
     reg_val |= (frame->can_dlc & 0x0000000F);
+#endif
     ch943x_canreg_write(s, CH9434D_CAN_TXMDTR0 + tx_mailbox * 4, reg_val);
 
-    memcpy(data, frame->data, frame->can_dlc);
-    reg_val = ((data[3] << 24) | (data[2] << 16) | (data[1] << 8) | (data[0]));
-    ch943x_canreg_write(s, CH9434D_CAN_TXMDLR0 + tx_mailbox * 4, reg_val);
-    reg_val = ((data[7] << 24) | (data[6] << 16) | (data[5] << 8) | (data[4]));
-    ch943x_canreg_write(s, CH9434D_CAN_TXMDHR0 + tx_mailbox * 4, reg_val);
+    if (rtr == 0) {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0))
+        memcpy(data, frame->data, frame->len);
+#else
+        memcpy(data, frame->data, frame->can_dlc);
+#endif
+        reg_val = ((data[3] << 24) | (data[2] << 16) | (data[1] << 8) | (data[0]));
+        ch943x_canreg_write(s, CH9434D_CAN_TXMDLR0 + tx_mailbox * 4, reg_val);
+        reg_val = ((data[7] << 24) | (data[6] << 16) | (data[5] << 8) | (data[4]));
+        ch943x_canreg_write(s, CH9434D_CAN_TXMDHR0 + tx_mailbox * 4, reg_val);
+    }
 
     reg_val = ch943x_canreg_read(s, CH9434D_CAN_TXMIR0 + tx_mailbox * 4);
     reg_val |= CAN_TXMIRx_TXRQ;
@@ -239,7 +255,11 @@ static void ch943x_tx_work_handler(struct work_struct *ws)
         return;
     }
     skb = tx_work->skb;
-    frame = (struct can_frame *)tx_work->skb->data;
+    if (!skb) {
+        kfree(tx_work);
+        return;
+    }
+    frame = (struct can_frame *)skb->data;
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0))
     frame->len = min_t(u8, frame->len, 8);
@@ -316,7 +336,7 @@ static int ch943x_set_mode(struct ch943x *s)
     unsigned long timeout;
     u32 reg_val;
 
-    DRV_DEBUG(s->dev, "%s ctrlmode:0x%x\n", __func__, priv->can.ctrlmode);
+    DRV_DEBUG(s->dev, "%s ctrlmode:%08x\n", __func__, priv->can.ctrlmode);
 
     /* Enable interrupts */
     reg_val = ch943x_canreg_read(s, CH9434D_CAN_INTENR);
@@ -325,6 +345,18 @@ static int ch943x_set_mode(struct ch943x *s)
                 CAN_INTENR_SLKIE | CAN_INTENR_FMPIE0 | CAN_INTENR_FMPIE1);
     reg_val |= CAN_INTENR_TMEIE;
     ch943x_canreg_write(s, CH9434D_CAN_INTENR, reg_val);
+
+    reg_val = ch943x_canreg_read(s, CH9434D_CAN_CTLR);
+    reg_val |= CAN_CTLR_INRQ;
+    ch943x_canreg_write(s, CH9434D_CAN_CTLR, reg_val);
+    timeout = jiffies + HZ;
+    while (((ch943x_canreg_read(s, CH9434D_CAN_STATR) & CAN_STATR_INAK) != CAN_STATR_INAK)) {
+        usleep_range(CH943X_DELAY_MS * 1000, CH943X_DELAY_MS * 1000 * 2);
+        if (time_after(jiffies, timeout)) {
+            dev_err(s->dev, "ch9434d didn't enter in conf mode after reset\n");
+            return -EBUSY;
+        }
+    }
 
     if (priv->can.ctrlmode & CAN_CTRLMODE_LOOPBACK) {
         /* Put device into loopback mode */
@@ -336,20 +368,17 @@ static int ch943x_set_mode(struct ch943x *s)
         reg_val = ch943x_canreg_read(s, CH9434D_CAN_BTIMR);
         reg_val |= CAN_BTIMR_SILM;
         ch943x_canreg_write(s, CH9434D_CAN_BTIMR, reg_val);
-    } else {
-        /* Put device into normal mode */
-        reg_val = ch943x_canreg_read(s, CH9434D_CAN_CTLR);
-        reg_val &= ~CAN_CTLR_INRQ;
-        ch943x_canreg_write(s, CH9434D_CAN_CTLR, reg_val);
+    }
 
-        /* Wait for the device to enter normal mode */
-        timeout = jiffies + HZ;
-        while ((ch943x_canreg_read(s, CH9434D_CAN_STATR) & CAN_STATR_INAK) == CAN_STATR_INAK) {
-            usleep_range(CH943X_DELAY_MS * 1000, CH943X_DELAY_MS * 1000 * 2);
-            if (time_after(jiffies, timeout)) {
-                dev_err(s->dev, "ch9434d didn't enter in conf mode after reset\n");
-                return -EBUSY;
-            }
+    reg_val = ch943x_canreg_read(s, CH9434D_CAN_CTLR);
+    reg_val &= ~CAN_CTLR_INRQ;
+    ch943x_canreg_write(s, CH9434D_CAN_CTLR, reg_val);
+    timeout = jiffies + HZ;
+    while (((ch943x_canreg_read(s, CH9434D_CAN_STATR) & CAN_STATR_INAK) == CAN_STATR_INAK)) {
+        usleep_range(CH943X_DELAY_MS * 1000, CH943X_DELAY_MS * 1000 * 2);
+        if (time_after(jiffies, timeout)) {
+            dev_err(s->dev, "ch9434d didn't enter in conf mode after reset\n");
+            return -EBUSY;
         }
     }
 
@@ -388,16 +417,16 @@ static netdev_tx_t ch943x_start_xmit(struct sk_buff *skb, struct net_device *nde
     if (can_dropped_invalid_skb(ndev, skb))
         return NETDEV_TX_OK;
 
+    spin_lock_irqsave(&priv->tx_lock, flags);
     for (i = 0; i < TX_MAILBOX_NR; i++) {
         if (!priv->tx_busy[i] && ((priv->txm_pendbits & BIT(i)) == 0)) {
             tx_mailbox_id = i;
-            spin_lock_irqsave(&priv->tx_lock, flags);
             priv->tx_busy[i] = true;
             priv->txm_pendbits |= BIT(i);
-            spin_unlock_irqrestore(&priv->tx_lock, flags);
             break;
         }
     }
+    spin_unlock_irqrestore(&priv->tx_lock, flags);
 
     if (tx_mailbox_id < 0) {
         netif_stop_queue(ndev);
@@ -406,8 +435,12 @@ static netdev_tx_t ch943x_start_xmit(struct sk_buff *skb, struct net_device *nde
 
     tx_work = kmalloc(sizeof(*tx_work), GFP_ATOMIC);
     if (!tx_work) {
-        pr_err("kmallor error\n");
-        return -ENOMEM;
+        dev_err(s->dev, "kmalloc for tx_work failed\n");
+        spin_lock_irqsave(&priv->tx_lock, flags);
+        priv->tx_busy[tx_mailbox_id] = false;
+        priv->txm_pendbits &= ~BIT(tx_mailbox_id);
+        spin_unlock_irqrestore(&priv->tx_lock, flags);
+        return NETDEV_TX_BUSY;
     }
     INIT_WORK(&tx_work->work, ch943x_tx_work_handler);
     tx_work->tx_mailbox_id = tx_mailbox_id;
@@ -417,10 +450,6 @@ static netdev_tx_t ch943x_start_xmit(struct sk_buff *skb, struct net_device *nde
 
     return NETDEV_TX_OK;
 }
-
-static const struct ethtool_ops ch943x_ethtool_ops = {
-    .get_ts_info = ethtool_op_get_ts_info,
-};
 
 static const struct can_bittiming_const ch943x_bittiming_const = {
     .name = "ch943x_can",
@@ -511,7 +540,6 @@ int ch943x_can_register(struct ch943x *s)
         return -ENOMEM;
 
     ndev->netdev_ops = &ch943x_netdev_ops;
-    ndev->ethtool_ops = &ch943x_ethtool_ops;
     ndev->flags |= IFF_ECHO;
 
     s->priv = netdev_priv(ndev);
@@ -544,25 +572,38 @@ int ch943x_can_register(struct ch943x *s)
 
     ret = ch943x_hw_sleep(s);
     if (ret < 0)
-        goto error_probe;
+        goto error_wq;
 
     SET_NETDEV_DEV(ndev, s->dev);
 
     ret = register_candev(ndev);
     if (ret)
-        goto error_probe;
+        goto error_wq;
 
     return 0;
 
+error_wq:
+    destroy_workqueue(s->priv->wq);
+    s->priv->wq = NULL;
 error_probe:
     free_candev(ndev);
+    s->priv = NULL;
 
     return ret;
 }
 
 void ch943x_can_remove(struct ch943x *s)
 {
+    if (!s->priv)
+        return;
+
     unregister_candev(s->priv->ndev);
+    if (s->priv->wq) {
+        destroy_workqueue(s->priv->wq);
+        s->priv->wq = NULL;
+    }
+    free_candev(s->priv->ndev);
+    s->priv = NULL;
 }
 
 #ifdef CAN_RX_CONTMODE
@@ -582,7 +623,11 @@ static int ch943x_hw_rx_contmode(struct ch943x *s, int rx_mailbox)
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
-    ret = ch943x_rxmailbox_read(s, CH9434D_CAN_RX0READ_CONT + rx_mailbox, rxbuf);
+    ret = ch943x_rxmailbox_read(s, CH9434D_CAN_RX0READ_CONT + rx_mailbox, sizeof(rxbuf), rxbuf);
+    if (ret < 0) {
+        dev_err(s->dev, "rxmailbox read failed: %d\n", ret);
+        return ret;
+    }
     for (i = 0; i < 4; i++) {
         memcpy(rxinfo + i, rxbuf + (i * 16), 16);
         if (memcmp(rxinfo + i, cmpbuf, 16) == 0) {
@@ -625,10 +670,11 @@ static int ch943x_hw_rx_contmode(struct ch943x *s, int rx_mailbox)
         buf[5] = 0xFF & (rxinfo[i].rxmdh >> 8);
         buf[6] = 0xFF & (rxinfo[i].rxmdh >> 16);
         buf[7] = 0xFF & (rxinfo[i].rxmdh >> 24);
-        memcpy(frame->data, buf, frame->can_dlc);
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0))
+        memcpy(frame->data, buf, frame->len);
         priv->ndev->stats.rx_bytes += frame->len;
 #else
+        memcpy(frame->data, buf, frame->can_dlc);
         priv->ndev->stats.rx_bytes += frame->can_dlc;
 #endif
         priv->ndev->stats.rx_packets++;
@@ -692,11 +738,12 @@ static void ch943x_hw_rx(struct ch943x *s, int rx_mailbox)
     buf[5] = 0xFF & (reg_val >> 8);
     buf[6] = 0xFF & (reg_val >> 16);
     buf[7] = 0xFF & (reg_val >> 24);
-    memcpy(frame->data, buf, frame->can_dlc);
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0))
+    memcpy(frame->data, buf, frame->len);
     priv->ndev->stats.rx_bytes += frame->len;
 #else
+    memcpy(frame->data, buf, frame->can_dlc);
     priv->ndev->stats.rx_bytes += frame->can_dlc;
 #endif
 
@@ -719,7 +766,8 @@ static void ch943x_can_err(struct ch943x *s, u32 fifo0_state, u32 fifo1_state, u
     struct sk_buff *skb;
     struct can_frame *frame;
     struct net_device_stats *stats = &ndev->stats;
-    enum can_state new_state;
+    enum can_state new_state = s->priv->can.state;
+    bool bus_off = false;
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
     dev_err(s->dev, "CAN error, reg:%02x:%08x, reg:%02x:%08x, reg:%02x:%08x\n", CH9434D_CAN_RFIFO0, fifo0_state,
@@ -744,13 +792,12 @@ static void ch943x_can_err(struct ch943x *s, u32 fifo0_state, u32 fifo1_state, u
         s->priv->can.can_stats.error_warning++;
     } else if (err_state & CAN_ERRSR_EPVF) {
         dev_err(s->dev, "CAN RX/TX error count RX:%d TX:%d\n", (err_state >> 24) & 0xff, (err_state >> 16) & 0xff);
+        new_state = CAN_STATE_ERROR_PASSIVE;
         if (err_state & CAN_ERRSR_REC) {
-            new_state = CAN_STATE_ERROR_PASSIVE;
             frame->can_id |= CAN_ERR_CRTL;
             frame->data[1] = CAN_ERR_CRTL_RX_PASSIVE;
         }
         if (err_state & CAN_ERRSR_TEC) {
-            new_state = CAN_STATE_ERROR_PASSIVE;
             frame->can_id |= CAN_ERR_CRTL;
             frame->data[1] = CAN_ERR_CRTL_TX_PASSIVE;
         }
@@ -760,17 +807,23 @@ static void ch943x_can_err(struct ch943x *s, u32 fifo0_state, u32 fifo1_state, u
         new_state = CAN_STATE_BUS_OFF;
         frame->can_id |= CAN_ERR_BUSOFF;
         s->priv->can.can_stats.bus_off++;
+        bus_off = true;
         can_bus_off(ndev);
-        ch943x_hw_sleep(s);
+        /* Schedule hw sleep and restart via workqueue — must not block interrupt thread */
+        queue_work(s->priv->wq, &s->priv->restart_work);
     }
 
     /* Update can state statistics */
     s->priv->can.state = new_state;
+
+    /* can_bus_off() already frees/consumes the skb — we must not touch it after */
+    if (!bus_off) {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0))
-    netif_rx(skb);
+        netif_rx(skb);
 #else
-    netif_rx_ni(skb);
+        netif_rx_ni(skb);
 #endif
+    }
 }
 
 void ch943x_can_irq(struct ch943x *s)
@@ -779,7 +832,7 @@ void ch943x_can_irq(struct ch943x *s)
     u32 err_state;
     int i, j;
     int frame_nums;
-    u32 fifo0_state, fifo1_state, fifo_state;
+    u32 fifo_state[2] = {0};
     struct net_device *ndev = s->priv->ndev;
     struct ch943x_can_priv *priv = netdev_priv(ndev);
     unsigned long flags;
@@ -831,12 +884,8 @@ void ch943x_can_irq(struct ch943x *s)
     }
 
     for (i = 0; i < 2; i++) {
-        fifo_state = ch943x_canreg_read(s, CH9434D_CAN_RFIFO0 + i);
-        if (i == 0)
-            fifo0_state = fifo_state;
-        else
-            fifo1_state = fifo_state;
-        if (fifo_state & (CAN_RFIFOx_FMPx | CAN_RFIFOx_FULLx | CAN_RFIFOx_FOVRx)) {
+        fifo_state[i] = ch943x_canreg_read(s, CH9434D_CAN_RFIFO0 + i);
+        if (fifo_state[i] & (CAN_RFIFOx_FMPx | CAN_RFIFOx_FULLx | CAN_RFIFOx_FOVRx)) {
             ch943x_canreg_write(s, CH9434D_CAN_RFIFO0 + i, CAN_RFIFOx_FULLx | CAN_RFIFOx_FOVRx);
 #ifdef CAN_RX_CONTMODE
             for (j = 0; j < 4; j++) {
@@ -846,9 +895,9 @@ void ch943x_can_irq(struct ch943x *s)
                 }
             }
 #else
-            frame_nums = fifo_state & 0x000000FF;
+            frame_nums = fifo_state[i] & 0x000000FF;
             for (j = 0; j < frame_nums; j++)
-                ch943x_hw_rx(s, 0);
+                ch943x_hw_rx(s, i);
 #endif
         }
     }
@@ -861,8 +910,8 @@ void ch943x_can_irq(struct ch943x *s)
             ch943x_canreg_write(s, CH9434D_CAN_ERRSR, 0x00);
     }
 
-    if ((fifo0_state & CAN_RFIFOx_FOVRx) || (fifo1_state & CAN_RFIFOx_FOVRx) || err_state) {
-        ch943x_can_err(s, fifo0_state, fifo1_state, err_state);
+    if ((fifo_state[0] & CAN_RFIFOx_FOVRx) || (fifo_state[1] & CAN_RFIFOx_FOVRx) || err_state) {
+        ch943x_can_err(s, fifo_state[0], fifo_state[1], err_state);
     }
 }
 #endif
