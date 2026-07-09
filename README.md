@@ -214,7 +214,7 @@ root@user:~# insmod ch943x-module.ko
 ### 3.1 SPI接口模式
 
 单SPI主机应用：
-修改`ch943x_ctrl.c`中`ch943x_io_enable`函数，根据SPI从机或CS索引号区分芯片，并根据实际应用需求配置引脚功能复用，示例：
+修改`ch943x_comm.c`中`ch943x_io_enable`函数，根据SPI从机或CS索引号区分芯片，并根据实际应用需求配置引脚功能复用，示例：
 
 ```c
 int ch943x_io_enable(struct ch943x *s)
@@ -240,7 +240,7 @@ int ch943x_io_enable(struct ch943x *s)
 ```
 
 多SPI主机应用：
-修改`ch943x_ctrl.c`中`ch943x_io_enable`函数，可根据SPI总线所以区分芯片，并根据实际应用需求配置引脚功能复用，示例：
+修改`ch943x_comm.c`中`ch943x_io_enable`函数，可根据SPI总线所以区分芯片，并根据实际应用需求配置引脚功能复用，示例：
 
 ```c
 int ch943x_io_enable(struct ch943x *s)
@@ -263,7 +263,7 @@ int ch943x_io_enable(struct ch943x *s)
 ### 3.2 I2C接口模式
 
 单I2C主机应用
-修改`ch943x_ctrl.c`中`ch943x_io_enable`函数，可根据I2C从机地址区分芯片，并根据实际应用需求配置引脚功能复用，示例：
+修改`ch943x_comm.c`中`ch943x_io_enable`函数，可根据I2C从机地址区分芯片，并根据实际应用需求配置引脚功能复用，示例：
 
 ```c
 int ch943x_io_enable(struct ch943x *s)
@@ -284,7 +284,7 @@ int ch943x_io_enable(struct ch943x *s)
 ```
 
 多I2C主机应用
-修改`ch943x_ctrl.c`中`ch943x_io_enable`函数，可根据I2C主机总线索引区分芯片，并根据实际应用需求配置引脚功能复用，示例：
+修改`ch943x_comm.c`中`ch943x_io_enable`函数，可根据I2C主机总线索引区分芯片，并根据实际应用需求配置引脚功能复用，示例：
 
 ```c
 int ch943x_io_enable(struct ch943x *s)
@@ -338,7 +338,7 @@ static int ctrluart_init(struct ch943x *s)
 }
 ```
 
-然后修改`ch943x_ctrl.c`中`ch943x_io_enable`函数，可根据`platform_device`的`id`字段区分芯片，并根据实际应用需求配置引脚功能复用，示例：
+然后修改`ch943x_comm.c`中`ch943x_io_enable`函数，可根据`platform_device`的`id`字段区分芯片，并根据实际应用需求配置引脚功能复用，示例：
 
 ```c
 int ch943x_io_enable(struct ch943x *s)

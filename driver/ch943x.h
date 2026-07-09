@@ -767,6 +767,7 @@ struct ch943x_one {
     u8 msr_reg;
     u8 mcr_force;
     atomic_t isopen;
+    int err_times;
     volatile bool txfifo_empty_flag;
     u8 *txbuf;
     u8 *rxbuf;

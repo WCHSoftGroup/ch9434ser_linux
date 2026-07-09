@@ -344,6 +344,16 @@ void ch943x_port_irq(struct ch943x *s, int portno)
             break;
         } else if (unlikely(rxlen == 0)) {
             dev_info(port->dev, "%s u%d rxlen:%d iir:%02x", __func__, port->line, rxlen, iir);
+            if (s->chip.chiptype == CHIP_CH9434A) {
+                /**
+                 * need to reset fifo to clear wrong cnt
+                 */
+                p->err_times++;
+                if (p->err_times > 10) {
+                    p->err_times = 0;
+                    ch943x_fcr_update(s, port->line, CH943X_FCR_RXRESET_BIT | CH943X_FCR_FIFO_BIT);
+                }
+            }
             break;
         }
         if (rxlen > 2048)
