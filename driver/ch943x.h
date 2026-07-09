@@ -1,7 +1,10 @@
-#define DEBUG
-#define VERBOSE_DEBUG
 
-#include "linux/version.h"
+#include "ch943x_cfg.h"
+#if !defined(USE_SPI_MODE) && !defined(USE_I2C_MODE) && !defined(USE_SERIAL_MODE)
+#error "One of USE_SPI_MODE, USE_I2C_MODE, USE_SERIAL_MODE must be defined in ch943x_cfg.h"
+#endif
+
+#include <linux/version.h>
 #include <linux/bitops.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -41,50 +44,38 @@
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
 #include <linux/proc_fs.h>
-
-#include "ch943x_cfg.h"
+#include <linux/sched/signal.h>
 
 #define DRIVER_AUTHOR   "WCH"
 #define DRIVER_DESC     "SPI/I2C/UART to SERIAL/CAN/GPIO driver for CH9434/CH9438/CH9437/CH9432, etc"
-#define VERSION_DESC    "V1.6 On 2026.04"
-#define CH943X_NAME_SPI "ch943x_spi"
-#define CH943X_NAME_I2C "ch943x_i2c"
+#define VERSION_DESC    "V1.7 On 2026.07"
 
-#if ENABLE_DRIVER_DEBUG
-#define DRV_DEBUG(dev, format, ...)          \
-    do {                                     \
-        dev_dbg(dev, format, ##__VA_ARGS__); \
+extern int drv_debug_enable;
+#define DRV_DEBUG(dev, format, ...)               \
+    do {                                          \
+        if (drv_debug_enable >= 1)                \
+            dev_info(dev, format, ##__VA_ARGS__); \
     } while (0)
-#else
-#define DRV_DEBUG(dev, format, ...)          \
-    if (0) {                                 \
-        dev_dbg(dev, format, ##__VA_ARGS__); \
-    }
-#endif
 
-#if ENABLE_DRIVER_VERBOSEDEGUG
-#define DRV_DEBUG_HEXDUMP(prefix_str, prefix_type, rowsize, groupsize, buf, len, ascii)           \
-    do {                                                                                          \
-        print_hex_dump(KERN_DEBUG, prefix_str, prefix_type, rowsize, groupsize, buf, len, ascii); \
+#define DRV_DEBUG_HEXDUMP(prefix_str, prefix_type, rowsize, groupsize, buf, len, ascii)              \
+    do {                                                                                             \
+        if (drv_debug_enable >= 2)                                                                   \
+            print_hex_dump(KERN_INFO, prefix_str, prefix_type, rowsize, groupsize, buf, len, ascii); \
     } while (0)
-#else
-#define DRV_DEBUG_HEXDUMP(prefix_str, prefix_type, rowsize, groupsize, buf, len, ascii) no_printk(KERN_DEBUG prefix_str)
-#endif
 
 #define ENABLE  1
 #define DISABLE 0
 
-#define IOCTL_MAGIC                  'W'
-#define IOCTL_CMD_CH9434D_GPIOENABLE _IOWR(IOCTL_MAGIC, 0x86, uint16_t)
-#define IOCTL_CMD_CH9438_GPIOENABLE  _IOWR(IOCTL_MAGIC, 0x90, uint16_t)
-#define IOCTL_CMD_CH9437_GPIOENABLE  _IOWR(IOCTL_MAGIC, 0x91, uint16_t)
-#define IOCTL_CMD_CH9432_GPIOENABLE  _IOWR(IOCTL_MAGIC, 0x92, uint16_t)
-#define IOCTL_CTRL_WRITE             _IOWR(IOCTL_MAGIC, 0x87, uint16_t)
-#define IOCTL_CTRL_READ              _IOWR(IOCTL_MAGIC, 0x88, uint16_t)
-#define IOCTL_CMD_GETCHIPTYPE        _IOWR(IOCTL_MAGIC, 0x89, uint16_t)
-
-#define IOCTL_CTRL_SERIALMODE_FIFO_READ  _IOWR(IOCTL_MAGIC, 0x93, uint16_t)
-#define IOCTL_CTRL_SERIALMODE_FIFO_WRITE _IOWR(IOCTL_MAGIC, 0x94, uint16_t)
+#define IOCTL_MAGIC                      'W'
+#define IOCTL_CMD_CH9434D_GPIOENABLE     _IOWR(IOCTL_MAGIC, 0x86, u16)
+#define IOCTL_CMD_CH9438_GPIOENABLE      _IOWR(IOCTL_MAGIC, 0x90, u16)
+#define IOCTL_CMD_CH9437_GPIOENABLE      _IOWR(IOCTL_MAGIC, 0x91, u16)
+#define IOCTL_CMD_CH9432_GPIOENABLE      _IOWR(IOCTL_MAGIC, 0x92, u16)
+#define IOCTL_CTRL_WRITE                 _IOWR(IOCTL_MAGIC, 0x87, u16)
+#define IOCTL_CTRL_READ                  _IOWR(IOCTL_MAGIC, 0x88, u16)
+#define IOCTL_CMD_GETCHIPTYPE            _IOWR(IOCTL_MAGIC, 0x89, u16)
+#define IOCTL_CTRL_SERIALMODE_FIFO_READ  _IOWR(IOCTL_MAGIC, 0x93, u16)
+#define IOCTL_CTRL_SERIALMODE_FIFO_WRITE _IOWR(IOCTL_MAGIC, 0x94, u16)
 
 #define VER_LEN             4
 #define CH943X_REG_OP_WRITE 0x80
@@ -97,6 +88,9 @@
 #define CH9434X_IO_CMD_ACT    0xA5
 #define CH9434X_IO_CMD_COMP   0x5A
 #define CH943X_IO_SEL_FUN_CFG 0x45
+
+#define IOSTATE_ENABLE  0x01
+#define IOSTATE_DISABLE 0x00
 
 /**
  * CH9434D/CH9437/CH9438/CH9432 INT#
@@ -218,48 +212,8 @@
 #define CH9434D_DEF_CAN_ADD 6
 /*************************************************************************/
 
-static const int ch943x_tnow_enable[] = {
-#ifdef CH943X_TNOW0_ON
-    1,
-#else
-    0,
-#endif
-#ifdef CH943X_TNOW1_ON
-    1,
-#else
-    0,
-#endif
-#ifdef CH943X_TNOW2_ON
-    1,
-#else
-    0,
-#endif
-#ifdef CH943X_TNOW3_ON
-    1,
-#else
-    0,
-#endif
-#ifdef CH943X_TNOW4_ON
-    1,
-#else
-    0,
-#endif
-#ifdef CH943X_TNOW5_ON
-    1,
-#else
-    0,
-#endif
-#ifdef CH943X_TNOW6_ON
-    1,
-#else
-    0,
-#endif
-#ifdef CH943X_TNOW7_ON
-    1,
-#else
-    0,
-#endif
-};
+/* Defined in ch943x_core.c to avoid per-TU duplication */
+extern const int ch943x_tnow_enable[8];
 
 #define CH943X_TNOW_ENABLE(n) \
     ((n) >= 0 && (n) < (int)(sizeof(ch943x_tnow_enable) / sizeof(ch943x_tnow_enable[0])) ? ch943x_tnow_enable[n] : 0)
@@ -405,45 +359,28 @@ static const int ch943x_tnow_enable[] = {
 
 /* FIFO */
 #define CH943X_FIFO_RD_BIT (0 << 4) /* Receive FIFO */
-#define CH943X_FIFO_WR_BIT (1 << 4) /* Receive FIFO */
+#define CH943X_FIFO_WR_BIT (1 << 4) /* Transmit FIFO */
 
 /* SPI Cont Mode Set */
 #define CH943X_SPI_CONTE_BIT (1 << 0) /* SPI Cont Enable */
 
 /* Misc definitions */
-#define CH943X_FIFO_SIZE (1536)
+#define CH943X_TXFIFO_SIZE (1536)
+#define CH943X_RXFIFO_SIZE (2048)
 #define CH943X_CMD_DELAY 3
 
+#ifdef USE_SPI_MODE
+#define CAN_TX_CONTMODE
+#define CAN_RX_CONTMODE
+#endif
+
+#define CH943X_CANREG_CMD             0x46
+#define CH943X_CANREG_CMD_NOTIMEINTER 0x47
 #ifdef CH9434D_CAN_ON
 /* -----------------------------------------------------------------------------
  *                         CH9434D CAN Related
  * -----------------------------------------------------------------------------
  */
-#ifdef USE_SPI_MODE
-#define CAN_TX_CONTMODE
-#define CAN_RX_CONTMODE
-#endif
-#ifdef CH943X_CANREG_NOTIMEINTER
-#define SPI_W_CAN_DELAY1_US 3
-
-#define SPI_W_CAN_ADD_SYNC_CODE  0x22
-#define SPI_W_CAN_ADD_INCP_CODE  0x24
-#define SPI_W_CAN_DEAL_SYNC_CODE 0x28
-#define SPI_W_CAN_DEAL_INCP_CODE 0x30
-
-#define SPI_R_CAN_ADD_SYNC_CODE  0x22
-#define SPI_R_CAN_ADD_INCP_CODE  0x24
-#define SPI_R_CAN_DATA_SYNC_CODE 0x28
-#define SPI_R_CAN_DATA_INCP_CODE 0x30
-
-#define W_WAIT_CAN_ADD_SYNC_CODE 0x42
-#define W_RSP_CAN_DATA_INCP_CODE 0x44
-#define R_WAIT_CAN_ADD_SYNC_CODE 0x42
-#define R_RSP_CAN_DATA_INCP_CODE 0x44
-#endif 
-
-#define CH943X_CANREG_CMD             0x46
-#define CH943X_CANREG_CMD_NOTIMEINTER 0x47
 
 #define CH9434D_CAN_CTLR 0x00
 /*******************  Bit definition for CAN_CTLR register  ********************/
@@ -630,7 +567,7 @@ static const int ch943x_tnow_enable[] = {
 
 #define CH9434D_CAN_FCTLR 0x1F
 /*******************  Bit definition for CAN_FCTLR register  ********************/
-#define CAN_FCTLR_FINIT ((uint8_t)BIT(0)) /* Filter Init Mode */
+#define CAN_FCTLR_FINIT ((u8)BIT(0)) /* Filter Init Mode */
 
 #define CH9434D_CAN_FMCFGR 0x20
 /*******************  Bit definition for CAN_FMCFGR register  *******************/
@@ -730,7 +667,7 @@ struct ch943x_chip_info {
     enum INTERFACE_MODE interface_mode;
     int nr_uart;
     int nr_gpio;
-    uint8_t ver[VER_LEN];
+    u8 ver[VER_LEN];
     char chip_name[16];
 };
 
@@ -768,7 +705,6 @@ struct ch943x_one {
     u8 mcr_force;
     atomic_t isopen;
     int err_times;
-    volatile bool txfifo_empty_flag;
     u8 *txbuf;
     u8 *rxbuf;
 };
@@ -778,6 +714,8 @@ struct ch943x {
     struct device *dev;
     struct list_head ch943x_list;
     struct uart_driver uart;
+    const struct ch943x_bus_ops *ops;
+    struct gpio_chip gpio_chip;
 #ifdef CH9434D_CAN_ON
     struct ch943x_can_priv *priv;
 #endif
@@ -795,10 +733,11 @@ struct ch943x {
     int ctrluart_baud;
 #endif
     char proc_file_name[16];
-    uint8_t reg485;
+    u8 reg485;
 #ifdef MULTI_CHIP_MODE
 #endif
-    uint8_t tnow_enable_bits;
+    u32 gpio_enable_bits;
+    u8 tnow_enable_bits;
     bool extern_clock_on;
     bool can_on;
 
@@ -808,40 +747,55 @@ struct ch943x {
     struct cdev cdev;
     struct ch943x_one *p;
     u8 *local_buf;
-    u8 rxfifo_buf[4096];
-    u8 txfifo_buf[4096];
 };
 
-extern int ch943x_iofunc_set(struct ch943x *s, uint8_t reg, uint8_t io_cmd, uint8_t io_addr);
+#define TRASFER_FLAG_NONE        0
+#define TRASFER_FLAG_COMM_REG8   1
+#define TRASFER_FLAG_UART_REG8   2
+#define TRASFER_FLAG_CAN_REG32   3
+#define TRASFER_FLAG_CAN_MAILBOX 4
+
+struct ch943x_bus_ops {
+    int (*write)(struct ch943x *s, u8 reg, int n_tx, u8 *txbuf, u32 flag);
+    int (*read)(struct ch943x *s, u8 reg, int n_rx, u8 *rxbuf, u32 flag);
+};
+extern struct ch943x_bus_ops ch943x_bus_ops;
+
+extern int ch943x_reg_read(struct ch943x *s, u8 reg, u32 n_rx, u8 *rxbuf);
+extern int ch943x_reg_write(struct ch943x *s, u8 reg, u32 n_tx, u8 *txbuf);
+extern int ch943x_reg_update(struct ch943x *s, u8 reg, u8 mask, u8 val);
+extern u8 ch943x_port_read(struct uart_port *port, u8 reg);
+extern int ch943x_port_write(struct uart_port *port, u8 reg, u8 val);
 extern int ch943x_iofunc_get(struct ch943x *s, uint8_t io_cmd, uint8_t io_addr);
-extern uint8_t ch943x_port_read(struct uart_port *port, uint8_t reg);
-extern int ch943x_port_write(struct uart_port *port, uint8_t reg, uint8_t val);
-extern int ch943x_reg_read(struct ch943x *s, u8 _cmd, u32 n_rx, void *rxbuf);
-extern int ch943x_reg_write(struct ch943x *s, u8 _cmd, u32 n_tx, const void *txbuf);
-extern int ch943x_port_update(struct uart_port *port, uint8_t reg, uint8_t mask, uint8_t val);
-extern int ch943x_raw_write(struct uart_port *port, u8 reg, u8 *buf, u32 len);
-extern int ch943x_raw_read(struct uart_port *port, uint8_t reg, u8 *buf, u32 len);
-extern int ch943x_fcr_update(struct ch943x *s, int portno, uint8_t _val);
+extern int ch943x_iofunc_set(struct ch943x *s, u8 io_cmd, u8 io_addr, u8 enable);
+
 extern int ch943x_get_chip_version(struct ch943x *s);
-extern int ch943x_scr_test(struct uart_port *port);
-extern int ch943x_port_bulkread(struct ch943x *s, u8 reg, uint8_t *buf, int len);
+
+extern int ch943x_port_bulkread(struct ch943x *s, u8 reg, u8 *buf, int len);
 extern int ch943x_register_uart_driver(struct ch943x *s);
 extern int ch943x_register_uart_port(struct ch943x *s);
 extern void ch943x_uart_remove(struct ch943x *s);
-extern irqreturn_t ch943x_ist_top(int irq, void *dev_id);
-extern irqreturn_t ch943x_ist(int irq, void *dev_id);
-extern void ch943x_port_irq_bulkmode(struct ch943x *s);
+
 extern void ch943x_port_irq(struct ch943x *s, int portno);
+extern void ch943x_port_irq_bulkmode(struct ch943x *s);
+
+extern int ch943x_gpio_register(struct ch943x *s);
+extern int ch943x_gpio_remove(struct ch943x *s);
+extern bool gpio_is_available(struct ch943x *s, unsigned int offset);
+extern int gpio_muxfunc_enable(struct ch943x *s, unsigned int offset);
+extern int gpio_reg_enable(struct ch943x *s, unsigned int offset, bool enable);
+
 #ifdef USE_SERIAL_MODE
 extern int ch943x_ctrl_tty_write(struct ch943x *s, u32 n_tx, const void *txbuf);
 extern int ch943x_ctrl_tty_read(struct ch943x *s, u32 n_rx, void *rxbuf);
+
+extern int ch9437_serialmode_fifo_read(struct ch943x *s, u8 cmd, u32 n_rx, u8 *rxbuf);
+extern int ch9437_serialmode_fifo_write(struct ch943x *s, u8 cmd, u32 n_tx, u8 *txbuf);
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0))
 extern int ch943x_ctrluart_setopt(struct ch943x *s);
 #endif
-extern int ch9437_reg_bulkread_serialmode(struct ch943x *s, u8 *buf);
 #endif
-extern int ch943x_debugfs_init(struct ch943x *s);
-extern void ch943x_debugfs_exit(struct ch943x *s);
+
 #ifdef CH9434D_CAN_ON
 extern int ch943x_can_register(struct ch943x *s);
 extern void ch943x_can_remove(struct ch943x *s);
@@ -849,8 +803,12 @@ extern void ch943x_can_irq(struct ch943x *s);
 extern int ch943x_canreg_write(struct ch943x *s, u8 reg, u32 val);
 extern u32 ch943x_canreg_read(struct ch943x *s, u8 reg);
 
-extern int ch943x_rxmailbox_read(struct ch943x *s, u8 reg, u8 *rxbuf);
-extern int ch943x_txmailbox_write(struct ch943x *s, u8 reg, u32 n_tx, const void *txbuf);
+extern int ch943x_rxmailbox_read(struct ch943x *s, u8 reg, u32 n_rx, u8 *rxbuf);
+extern int ch943x_txmailbox_write(struct ch943x *s, u8 reg, u32 n_tx, u8 *txbuf);
 #endif
+
+extern int ch943x_debugfs_init(struct ch943x *s);
+extern void ch943x_debugfs_exit(struct ch943x *s);
+
 extern int ch943x_io_enable(struct ch943x *s);
-extern int __ch943x_io_ioctl(struct ch943x *s, unsigned int cmd, unsigned long arg);
+extern int ch943x_ioctl_do(struct ch943x *s, unsigned int cmd, unsigned long arg);
