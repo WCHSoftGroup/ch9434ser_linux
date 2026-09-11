@@ -1,9 +1,3 @@
-
-/* enable or disable the output of debug information (read/write registers) */
-#define ENABLE_DRIVER_DEBUG 0
-/* enable or disable the output of more detailed debugging information */
-#define ENABLE_DRIVER_VERBOSEDEGUG 0
-
 /**
  * If this macro is defined, it indicates that the interrupt is obtained from the dts.
  * The macro "USE_IRQ_FROM_DTS" cannot be defined simultaneously with the macro "GPIO_NUMBER".
@@ -40,7 +34,7 @@
  * then the CTRLUART_PATH macro and CTRLUART_BAUD macro need to be defined
  * to declare the absolute path and baud rate of the control serial port.
  */
-#define CTRLUART_PATH "/dev/ttyS0"
+#define CTRLUART_PATH "/dev/ttyS3"
 #define CTRLUART_BAUD 4000000
 #endif
 

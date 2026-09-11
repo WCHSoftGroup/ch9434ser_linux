@@ -22,9 +22,7 @@
  * V1.4 - add support multiple chips, modify sysfs debug
  */
 
-#define DEBUG
-#define VERBOSE_DEBUG
-
+/* Debug can be enabled via:  #define DEBUG  /  #define VERBOSE_DEBUG */
 #undef DEBUG
 #undef VERBOSE_DEBUG
 
@@ -48,7 +46,7 @@
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
 #include <linux/proc_fs.h>
-#include "linux/version.h"
+#include <linux/version.h>
 
 #define DRIVER_AUTHOR "WCH"
 #define DRIVER_DESC   "SPI serial driver for ch432."
@@ -205,6 +203,9 @@ static int ch43x_alloc_minor(struct ch43x_port *s)
     }
     mutex_unlock(&ch43x_minors_lock);
 
+    if (minor >= CH43X_MAX_CNT)
+        return -ENOSR;
+
     return minor;
 }
 
@@ -253,13 +254,12 @@ static int ch43x_port_write(struct uart_port *port, u8 reg, u8 val)
     return 0;
 }
 
-static uint8_t ch43x_reg_read(struct ch43x_port *s, u8 cmd)
+static int ch43x_reg_read(struct ch43x_port *s, u8 cmd)
 {
     uint8_t txbuf[2] = {0};
     uint8_t rxbuf[2] = {0};
     struct spi_message m;
     struct spi_transfer xfer[2] = {};
-    uint8_t result;
     int status;
 
     txbuf[0] = cmd;
@@ -274,19 +274,17 @@ static uint8_t ch43x_reg_read(struct ch43x_port *s, u8 cmd)
     mutex_lock(&s->mutex_bus_access);
     status = spi_sync(s->spi_dev, &m);
     mutex_unlock(&s->mutex_bus_access);
-    if (status < 0) {
+    if (status < 0)
         return status;
-    }
-    result = rxbuf[1];
 
-    return result;
+    return rxbuf[1];
 }
 
-static uint8_t ch43x_port_read(struct uart_port *port, u8 reg)
+static int ch43x_port_read(struct uart_port *port, u8 reg)
 {
     struct ch43x_port *s = dev_get_drvdata(port->dev);
     uint8_t cmd;
-    uint8_t result;
+    int result;
 
     cmd = 0xFD & ((reg + port->line * 0x08) << CH43X_REG_SHIFT);
 
@@ -300,11 +298,11 @@ static uint8_t ch43x_port_read(struct uart_port *port, u8 reg)
     return result;
 }
 
-static u8 ch43x_port_read_specify(struct uart_port *port, u8 portnum, u8 reg)
+static int ch43x_port_read_specify(struct uart_port *port, u8 portnum, u8 reg)
 {
     struct ch43x_port *s = dev_get_drvdata(port->dev);
     unsigned char cmd;
-    u8 result;
+    int result;
 
     cmd = 0xFD & ((reg + portnum * 0x08) << CH43X_REG_SHIFT);
 
@@ -337,22 +335,26 @@ static int ch43x_port_write_spefify(struct uart_port *port, u8 portnum, u8 reg, 
 
 static void ch43x_port_update(struct uart_port *port, u8 reg, u8 mask, u8 val)
 {
-    unsigned int tmp;
+    int tmp;
 
     tmp = ch43x_port_read(port, reg);
+    if (tmp < 0)
+        return;
     tmp &= ~mask;
     tmp |= val & mask;
-    ch43x_port_write(port, reg, tmp);
+    ch43x_port_write(port, reg, (u8)tmp);
 }
 
 static void ch43x_port_update_specify(struct uart_port *port, u8 portnum, u8 reg, u8 mask, u8 val)
 {
-    unsigned int tmp;
+    int tmp;
 
     tmp = ch43x_port_read_specify(port, portnum, reg);
+    if (tmp < 0)
+        return;
     tmp &= ~mask;
     tmp |= val & mask;
-    ch43x_port_write_spefify(port, portnum, reg, tmp);
+    ch43x_port_write_spefify(port, portnum, reg, (u8)tmp);
 }
 
 void ch43x_raw_write(struct uart_port *port, const void *reg, unsigned char *buf, int len)
@@ -386,16 +388,18 @@ static struct ch43x_devtype ch43x_devtype = {
 static int ch43x_set_baud(struct uart_port *port, int baud)
 {
     struct ch43x_port *s = dev_get_drvdata(port->dev);
-    u8 lcr;
+    int lcr;
     unsigned long clk = port->uartclk;
     unsigned long div;
 
     dev_dbg(&s->spi_dev->dev, "%s - %d\n", __func__, baud);
 
-    /* when use clock multipication */
+    /* when use clock multiplication */
     div = clk / 16 / baud;
 
     lcr = ch43x_port_read(port, CH43X_LCR_REG);
+    if (lcr < 0)
+        return lcr;
 
     /* Open the LCR divisors for configuration */
     ch43x_port_write(port, CH43X_LCR_REG, CH43X_LCR_CONF_MODE_A);
@@ -405,27 +409,33 @@ static int ch43x_set_baud(struct uart_port *port, int baud)
     ch43x_port_write(port, CH43X_DLL_REG, div % 256);
 
     /* Put LCR back to the normal mode */
-    ch43x_port_write(port, CH43X_LCR_REG, lcr);
+    ch43x_port_write(port, CH43X_LCR_REG, (u8)lcr);
 
     return DIV_ROUND_CLOSEST(clk / 16, div);
 }
 
 static int ch43x_spi_test(struct ch43x_port *s)
 {
-    int ret, i;
+    int ret, i, val;
 
     dev_dbg(&s->spi_dev->dev, "******SPI Test Start******\n");
 
     for (i = 0; i < 2; i++) {
         ret = ch43x_reg_write(s, 0x02 | ((CH43X_SPR_REG + i * 0x08) << CH43X_REG_SHIFT), 0x55);
-        if (ch43x_reg_read(s, 0xFD & ((CH43X_SPR_REG + i * 0x08) << CH43X_REG_SHIFT)) != 0x55) {
-            dev_err(&s->spi_dev->dev, "%s Failed.", __func__);
-            return -1;
+        if (ret < 0)
+            return ret;
+        val = ch43x_reg_read(s, 0xFD & ((CH43X_SPR_REG + i * 0x08) << CH43X_REG_SHIFT));
+        if (val < 0 || val != 0x55) {
+            dev_err(&s->spi_dev->dev, "%s Failed.\n", __func__);
+            return -EIO;
         }
         ret = ch43x_reg_write(s, 0x02 | ((CH43X_SPR_REG + i * 0x08) << CH43X_REG_SHIFT), 0xAA);
-        if (ch43x_reg_read(s, 0xFD & ((CH43X_SPR_REG + i * 0x08) << CH43X_REG_SHIFT)) != 0xAA) {
-            dev_err(&s->spi_dev->dev, "%s Failed.", __func__);
-            return -1;
+        if (ret < 0)
+            return ret;
+        val = ch43x_reg_read(s, 0xFD & ((CH43X_SPR_REG + i * 0x08) << CH43X_REG_SHIFT));
+        if (val < 0 || val != 0xAA) {
+            dev_err(&s->spi_dev->dev, "%s Failed.\n", __func__);
+            return -EIO;
         }
     }
 
@@ -436,7 +446,8 @@ static int ch43x_spi_test(struct ch43x_port *s)
 static void ch43x_handle_rx(struct uart_port *port, unsigned int iir)
 {
     struct ch43x_port *s = dev_get_drvdata(port->dev);
-    unsigned int lsr = 0, ch, flag, bytes_read = 0;
+    unsigned int flag, bytes_read = 0;
+    int lsr, ch;
     bool read_lsr = (iir == CH43X_IIR_RLSE_SRC) ? true : false;
 
     dev_dbg(&s->spi_dev->dev, "%s\n", __func__);
@@ -452,16 +463,30 @@ static void ch43x_handle_rx(struct uart_port *port, unsigned int iir)
     /* At lest one error left in FIFO */
     if (read_lsr) {
         ch = ch43x_port_read(port, CH43X_RHR_REG);
+        if (ch < 0)
+            return;
         bytes_read = 1;
 
         goto ch_handler;
     } else {
-        while (((lsr = ch43x_port_read(port, CH43X_LSR_REG)) & CH43X_LSR_DR_BIT) == 0)
-            ;
+        /* Wait for data with a bounded timeout to avoid infinite
+         * SPI busy-wait if hardware is unresponsive. */
+        {
+            unsigned long timeout = jiffies + msecs_to_jiffies(50);
+            while (((lsr = ch43x_port_read(port, CH43X_LSR_REG)) & CH43X_LSR_DR_BIT) == 0) {
+                if (lsr < 0 || time_after(jiffies, timeout)) {
+                    dev_err(&s->spi_dev->dev, "%s - timeout/error waiting for RX data\n", __func__);
+                    return;
+                }
+                cpu_relax();
+            }
+        }
 
         do {
             if (likely(lsr & CH43X_LSR_DR_BIT)) {
                 ch = ch43x_port_read(port, CH43X_RHR_REG);
+                if (ch < 0)
+                    return;
                 bytes_read++;
             } else
                 break;
@@ -509,11 +534,17 @@ static void ch43x_handle_rx(struct uart_port *port, unsigned int iir)
 static void ch43x_handle_tx(struct uart_port *port)
 {
     struct ch43x_port *s = dev_get_drvdata(port->dev);
-    struct circ_buf *xmit = &port->state->xmit;
+    struct circ_buf *xmit;
     unsigned int txlen, to_send, i;
     unsigned char thr_reg;
 
     dev_dbg(&s->spi_dev->dev, "%s\n", __func__);
+
+    if (!port->state)
+        return;
+
+    xmit = &port->state->xmit;
+
     /* xon/xoff char */
     if (unlikely(port->x_char)) {
         ch43x_port_write(port, CH43X_THR_REG, port->x_char);
@@ -557,10 +588,16 @@ static void ch43x_handle_tx(struct uart_port *port)
 static void ch43x_port_irq(struct ch43x_port *s, int portno)
 {
     struct uart_port *port = &s->p[portno].port;
+    unsigned int loop_count = 0;
 
     do {
         unsigned int iir, msr;
         unsigned char lsr;
+
+        if (++loop_count > 256) {
+            dev_err(&s->spi_dev->dev, "%s - too many iterations on port %d\n", __func__, portno);
+            break;
+        }
         lsr = ch43x_port_read(port, CH43X_LSR_REG);
         if (lsr & 0x02) {
             port->icount.overrun++;
@@ -598,12 +635,14 @@ static void ch43x_port_irq(struct ch43x_port *s, int portno)
 
 static irqreturn_t ch43x_ist_top(int irq, void *dev_id)
 {
+    /* For threaded IRQ, hardirq handler just wakes the thread.
+     * We trust the IRQ is exclusively ours (no shared line). */
     return IRQ_WAKE_THREAD;
 }
 
 static irqreturn_t ch43x_ist(int irq, void *dev_id)
 {
-    struct ch43x_port *s = (struct ch43x_port *)dev_id;
+    struct ch43x_port *s = dev_id;
     int i;
 
     dev_dbg(&s->spi_dev->dev, "ch43x_ist interrupt enter...\n");
@@ -922,9 +961,8 @@ static void ch43x_shutdown(struct uart_port *port)
 
     dev_dbg(&s->spi_dev->dev, "%s\n", __func__);
 
-    /* Disable uart0 interrupts */
-    if (port->line == 0)
-        ch43x_port_write(port, CH43X_IER_REG, 0);
+    /* Disable all interrupts */
+    ch43x_port_write(port, CH43X_IER_REG, 0);
     ch43x_port_write(port, CH43X_MCR_REG, 0);
 
     one->mcr_force = 0;
@@ -1002,28 +1040,29 @@ static ssize_t ch43x_proc_read(struct file *file, char __user *user_buf, size_t 
     struct ch43x_port *s = pde_data(file_inode(file));
 #endif
     char *buf;
-    int i, j, len, ret;
+    int i, j, ret;
+    u32 len = 0;
     u8 lcr;
 
-    buf = kzalloc(4096, GFP_KERNEL);
+    buf = kzalloc(REGS_BUFSIZE, GFP_KERNEL);
     if (!buf)
-        return 0;
+        return -ENOMEM;
 
-    len += snprintf(buf + len, REGS_BUFSIZE - len, "============ch432 registers:============\n");
+    len += scnprintf(buf + len, REGS_BUFSIZE - len, "============ch432 registers:============\n");
 
     for (i = 0; i < s->devtype->nr_uart; i++) {
         lcr = ch43x_port_read(&s->p[i].port, CH43X_LCR_REG);
         ch43x_port_write(&s->p[i].port, CH43X_LCR_REG, lcr | CH43X_LCR_DLAB_BIT);
-        len += snprintf(buf + len, REGS_BUFSIZE - len, "============UART%d Dump register at DLAB=1============\n", i);
+        len += scnprintf(buf + len, REGS_BUFSIZE - len, "============UART%d Dump register at DLAB=1============\n", i);
         for (j = 0; j < 2; j++) {
-            len += snprintf(buf + len, REGS_BUFSIZE - len, "reg:0x%02x val:0x%02x\n", j,
+            len += scnprintf(buf + len, REGS_BUFSIZE - len, "reg:0x%02x val:0x%02x\n", j,
                             ch43x_port_read(&s->p[i].port, j));
         }
         ch43x_port_write(&s->p[i].port, CH43X_LCR_REG, lcr);
 
-        len += snprintf(buf + len, REGS_BUFSIZE - len, "============UART%d Dump register at DLAB=0============\n", i);
+        len += scnprintf(buf + len, REGS_BUFSIZE - len, "============UART%d Dump register at DLAB=0============\n", i);
         for (j = 0; j < 8; j++) {
-            len += snprintf(buf + len, REGS_BUFSIZE - len, "reg:0x%02x val:0x%02x\n", j,
+            len += scnprintf(buf + len, REGS_BUFSIZE - len, "reg:0x%02x val:0x%02x\n", j,
                             ch43x_port_read(&s->p[i].port, j));
         }
     }
@@ -1081,8 +1120,10 @@ static int ch43x_probe(struct spi_device *spi, struct ch43x_devtype *devtype, in
     }
 
     s->minor = ch43x_alloc_minor(s);
-    if (s->minor >= CH43X_MAX_CNT)
-        return -ENOMEM;
+    if (s->minor < 0) {
+        dev_err(dev, "Failed to allocate minor: %d\n", s->minor);
+        return s->minor;
+    }
 
     /* 22.1184Mhz Crystal by default, uart clock is processed to double frequency, refer CH432DS1.PDF chapter 5.2 */
     freq = CRYSTAL_FREQ * 2;
@@ -1092,16 +1133,16 @@ static int ch43x_probe(struct spi_device *spi, struct ch43x_devtype *devtype, in
 
     ret = ch43x_spi_test(s);
     if (ret < 0)
-        return -1;
+        goto release_minor;
 
     /* Register UART driver */
     s->uart.owner = THIS_MODULE;
     s->uart.dev_name = ch43x_uart_name[s->minor];
     s->uart.nr = devtype->nr_uart;
     ret = uart_register_driver(&s->uart);
-    if (ret) {
+    if (ret < 0) {
         dev_err(dev, "Registering UART driver failed\n");
-        goto out_clk;
+        return -EBUSY;
     }
 
     mutex_init(&s->mutex);
@@ -1154,9 +1195,8 @@ static int ch43x_probe(struct spi_device *spi, struct ch43x_devtype *devtype, in
 out:
     mutex_destroy(&s->mutex);
     uart_unregister_driver(&s->uart);
-out_clk:
-    if (!IS_ERR(s->clk))
-        /*clk_disable_unprepare(s->clk)*/;
+release_minor:
+    ch43x_release_minor(s);
 
     return ret;
 }
@@ -1179,8 +1219,6 @@ static int ch43x_remove(struct device *dev)
     mutex_destroy(&s->mutex);
     mutex_destroy(&s->mutex_bus_access);
     uart_unregister_driver(&s->uart);
-    if (!IS_ERR(s->clk))
-        /*clk_disable_unprepare(s->clk)*/;
 
     ch43x_debugfs_exit(s);
     ch43x_release_minor(s);
@@ -1202,15 +1240,11 @@ int ch43x_spi_probe(struct spi_device *spi)
     struct ch43x_devtype *devtype = &ch43x_devtype;
     unsigned long flags = IRQF_TRIGGER_LOW;
     int ret;
-    u32 save;
 
-    save = spi->mode;
     spi->mode |= SPI_MODE_3;
-    if (spi_setup(spi) < 0) {
-        spi->mode = save;
-    } else {
-        dev_dbg(&spi->dev, "change to SPI MODE 3!\n");
-    }
+    ret = spi_setup(spi);
+    if (ret < 0)
+        dev_dbg(&spi->dev, "spi_setup returned %d, continuing\n", ret);
 
 #ifdef USE_IRQ_FROM_DTS
     /* if your platform supports acquire irq number from dts */
@@ -1258,8 +1292,8 @@ static struct spi_driver ch43x_spi_driver = {
 
 static int __init ch43x_init(void)
 {
-    printk(KERN_INFO KBUILD_MODNAME ": " DRIVER_DESC "\n");
-    printk(KERN_INFO KBUILD_MODNAME ": " VERSION_DESC "\n");
+    pr_info(KBUILD_MODNAME ": " DRIVER_DESC "\n");
+    pr_info(KBUILD_MODNAME ": " VERSION_DESC "\n");
 
     return spi_register_driver(&ch43x_spi_driver);
 }
