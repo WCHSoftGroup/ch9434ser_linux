@@ -158,6 +158,11 @@ static int ch943x_i2c_write(struct ch943x *s, u8 cmd, int n_tx, u8 *txbuf, u32 f
     int index = 0;
     int ret;
 
+    if ((n_tx < 0) || (n_tx > (LOCAL_BUF_SIZE - 1))) {
+        dev_err(s->dev, "%s invalid n_tx: %d\n", __func__, n_tx);
+        return -EINVAL;
+    }
+
     mutex_lock(&s->mutex_bus_access);
     switch (flag) {
     case TRASFER_FLAG_COMM_REG8:
@@ -188,7 +193,7 @@ static int ch943x_i2c_write(struct ch943x *s, u8 cmd, int n_tx, u8 *txbuf, u32 f
     }
     mutex_unlock(&s->mutex_bus_access);
     if (ret != 1) {
-        dev_err(&i2c->dev, "%s i2c transfer failed\n", __func__);
+        dev_err(s->dev, "%s i2c transfer failed\n", __func__);
         return -EIO;
     }
 
@@ -231,7 +236,7 @@ static int ch943x_i2c_read(struct ch943x *s, u8 cmd, int n_rx, u8 *rxbuf, u32 fl
     ret = i2c_transfer(i2c->adapter, xfer, 2);
     mutex_unlock(&s->mutex_bus_access);
     if (ret != 2) {
-        dev_err(&i2c->dev, "%s i2c transfer failed\n", __func__);
+        dev_err(s->dev, "%s i2c transfer failed\n", __func__);
         return -EIO;
     }
 
@@ -241,6 +246,11 @@ static int ch943x_i2c_read(struct ch943x *s, u8 cmd, int n_rx, u8 *rxbuf, u32 fl
 static int ch943x_serial_write(struct ch943x *s, u8 cmd, int n_tx, u8 *txbuf, u32 flag)
 {
     int ret;
+
+    if ((n_tx < 0) || (n_tx > (LOCAL_BUF_SIZE - 3))) {
+        dev_err(s->dev, "%s invalid n_tx: %d\n", __func__, n_tx);
+        return -EINVAL;
+    }
 
     mutex_lock(&s->mutex_bus_access);
     s->local_buf[0] = 0x57;
@@ -571,45 +581,8 @@ int ch943x_ctrluart_setopt(struct ch943x *s)
 
     fp->f_op->unlocked_ioctl(fp, TCSETS2, (unsigned long)&tio);
     fp->f_op->unlocked_ioctl(fp, TCGETS2, (unsigned long)&tio);
+
     set_fs(fs);
-
-    return 0;
-}
-#else
-int ch943x_ctrluart_setopt(struct ch943x *s)
-{
-    struct termios uart_io;
-    struct termios2 tio;
-    struct file *fp = s->fp;
-
-    memset(&uart_io, 0, sizeof(uart_io));
-
-    uart_io.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
-    uart_io.c_oflag &= ~OPOST;
-    uart_io.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    uart_io.c_cflag &= ~(CSIZE | PARENB);
-    uart_io.c_cflag |= CS8;
-    uart_io.c_cflag &= ~CSTOPB;
-    uart_io.c_cflag |= CREAD | CLOCAL;
-    uart_io.c_cc[VMIN] = 0;
-    uart_io.c_cc[VTIME] = 1;
-
-    fp->f_op->unlocked_ioctl(fp, TCSETS, (unsigned long)&uart_io);
-    fp->f_op->unlocked_ioctl(fp, TCFLSH, 0);
-
-    fp->f_op->unlocked_ioctl(fp, TCGETS2, (unsigned long)&tio);
-    tio.c_cflag &= ~CBAUD;
-    tio.c_cflag |= BOTHER;
-#ifdef MULTI_CHIP_MODE
-    tio.c_ispeed = s->ctrluart_baud;
-    tio.c_ospeed = s->ctrluart_baud;
-#else
-    tio.c_ispeed = CTRLUART_BAUD;
-    tio.c_ospeed = CTRLUART_BAUD;
-#endif
-
-    fp->f_op->unlocked_ioctl(fp, TCSETS2, (unsigned long)&tio);
-    fp->f_op->unlocked_ioctl(fp, TCGETS2, (unsigned long)&tio);
 
     return 0;
 }
@@ -651,7 +624,7 @@ int ch9437_serialmode_fifo_write(struct ch943x *s, u8 cmd, u32 n_tx, u8 *txbuf)
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
-    buffer = kmalloc(2048, GFP_KERNEL);
+    buffer = kmalloc(n_tx + 5, GFP_KERNEL);
     if (!buffer)
         return -ENOMEM;
 
@@ -754,7 +727,9 @@ int ch943x_get_chip_version(struct ch943x *s)
     DRV_DEBUG(s->dev, "%s reg:%02x data:%02x %02x %02x %02x\n", __func__, CH943X_CHIP_VER_REG, s->chip.ver[0],
               s->chip.ver[1], s->chip.ver[2], s->chip.ver[3]);
 
-    if (s->chip.ver[2] == (s->chip.ver[0] + s->chip.ver[1])) {
+    if ((s->chip.ver[2] == (s->chip.ver[0] + s->chip.ver[1])) &&
+        ((s->chip.ver[3] == 0x5A) || (s->chip.ver[3] == 0x6B) || (s->chip.ver[3] == 0x7C) || (s->chip.ver[3] == 0x8D) ||
+         (s->chip.ver[3] == 0x9E))) {
         if (s->chip.ver[3] == 0x5A) {
 #ifdef USE_SPI_MODE
             s->chip.chiptype = CHIP_CH9434A;
@@ -794,20 +769,37 @@ int ch943x_get_chip_version(struct ch943x *s)
             return -ENODEV;
         }
     } else {
+        if (IS_USE_CHIP_CH9434M) {
+            /**
+             * CH9434M does not provide a version register, so the chip type must be
+             * statically specified.
+             *
+             * In the unlikely case that a board mixes CH9434M with CH9434A/D or other
+             * SPI-attached chips supported by this driver, the driver relies on
+             * chip_select, cs_gpio, or spi bus_num to distinguish which SPI bus or chip-select
+             * line connects to the CH9434M.
+             */
+            s->chip.chiptype = CHIP_CH9434M;
+            s->chip.nr_uart = 4;
+            s->chip.nr_gpio = 25;
 #ifdef USE_SPI_MODE
-        s->chip.chiptype = CHIP_CH9434M;
-        s->chip.nr_uart = 4;
-        s->chip.nr_gpio = 25;
-        valid_ver = false;
-        s->spi_contmode = false;
+            s->spi_contmode = false;
 #endif
+            strcpy(s->chip.chip_name, "CH9434M");
+            dev_info(s->dev, "CHIP TYPE:%s\n", s->chip.chip_name);
+        } else {
+            valid_ver = false;
+        }
     }
 
     if (valid_ver) {
-        dev_info(s->dev, "CHIP TYPE:%s - V%d.%d\n", s->chip.chip_name, s->chip.ver[1], s->chip.ver[0]);
+        if (strcmp(s->chip.chip_name, "CH9434M") != 0) {
+            dev_info(s->dev, "CHIP TYPE:%s - V%d.%d\n", s->chip.chip_name, s->chip.ver[1], s->chip.ver[0]);
+        }
     } else {
-        dev_info(s->dev, "No valid version:%02x %02x %02x %02x\n", s->chip.ver[0], s->chip.ver[1], s->chip.ver[2],
-                 s->chip.ver[3]);
+        dev_err(s->dev, "No valid version:%02x %02x %02x %02x\n", s->chip.ver[0], s->chip.ver[1], s->chip.ver[2],
+                s->chip.ver[3]);
+        return -ENODEV;
     }
 
     return 0;
@@ -880,7 +872,7 @@ int ch943x_io_enable(struct ch943x *s)
      */
 #endif
 #else
-    for (i = 0; i < 7; i++) {
+    for (i = 0; i < 8; i++) {
         if (CH943X_TNOW_ENABLE(i)) {
             s->tnow_enable_bits |= BIT(i);
         }

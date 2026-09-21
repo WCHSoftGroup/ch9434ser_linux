@@ -23,7 +23,7 @@
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
-#include "ch943x_lib.h"
+#include "ch943x_gpio_lib.h"
 
 int main(int argc, char *argv[])
 {

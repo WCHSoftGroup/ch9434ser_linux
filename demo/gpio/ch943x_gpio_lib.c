@@ -20,7 +20,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "ch943x_lib.h"
+#include "ch943x_gpio_lib.h"
 
 #define BIT(i) (1 << i)
 

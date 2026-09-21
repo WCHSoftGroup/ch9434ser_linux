@@ -25,6 +25,7 @@
  *        add GPIO sysfs interface support
  *        modify driver debug/log output mechanism
  *        improve resource management and error handling paths
+ *        add support for kernel version beyond 7.0
  */
 
 #include "ch943x.h"
@@ -215,11 +216,22 @@ static int ch943x_clock_init(struct ch943x *s)
             if (ret < 0)
                 return ret;
         }
-    } else {
+    } else if (s->chip.chiptype == CHIP_CH9434M) {
+        if (s->extern_clock_on)
+            data = CH943X_CLK_EXT_BIT | CH943X_CLK_PLL_BIT | 13;
+        else
+            data = CH943X_CLK_PLL_BIT | 13;
+        ret = ch943x_reg_write(s, CH943X_CLK_REG, 1, &data);
+        if (ret < 0)
+            return ret;
+    } else if (s->chip.chiptype == CHIP_CH9434A) {
         data = CH943X_CLK_EXT_BIT | CH943X_CLK_PLL_BIT | 13;
         ret = ch943x_reg_write(s, CH943X_CLK_REG, 1, &data);
         if (ret < 0)
             return ret;
+    } else {
+        dev_err(s->dev, "Unsupported chip type for clock init: %d\n", s->chip.chiptype);
+        return -EINVAL;
     }
     mdelay(200);
 
@@ -299,7 +311,7 @@ static int ctrluart_init(struct ch943x *s)
      * then the serial port application must be used to configure
      * parameters such as the baud rate of the serial port.
      */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0))
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
     ret = ch943x_ctrluart_setopt(s);
     if (ret < 0) {
 #ifdef MULTI_CHIP_MODE
@@ -307,23 +319,20 @@ static int ctrluart_init(struct ch943x *s)
 #else
         dev_err(s->dev, "set uart(%s) Failed.\n", CTRLUART_PATH);
 #endif
-        goto out;
+        filp_close(s->fp, NULL);
+        return ret;
     }
 #endif
 
     data = 0x55;
     ret = ch943x_ctrl_tty_write(s, 1, &data);
-    if (ret < 0)
-        goto out;
-
+    if (ret < 0) {
+        filp_close(s->fp, NULL);
+        return ret;
+    }
     mdelay(100);
 
     return 0;
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0))
-out:
-#endif
-    filp_close(s->fp, NULL);
-    return ret;
 }
 #endif
 
@@ -353,12 +362,14 @@ static int ch943x_probe(struct device *dev, int irq)
 
     s->irq = irq;
     s->reg485 = 0x00;
-    s->local_buf = devm_kmalloc(dev, 4096, GFP_KERNEL);
+    s->local_buf = devm_kmalloc(dev, LOCAL_BUF_SIZE, GFP_KERNEL);
     if (!s->local_buf) {
         ret = -ENOMEM;
         goto release_minor;
     }
     s->ops = &ch943x_bus_ops;
+    mutex_init(&s->mutex);
+    mutex_init(&s->mutex_bus_access);
 
 #ifdef USE_SPI_MODE
     s->spi_dev = to_spi_device(dev);
@@ -375,9 +386,6 @@ static int ch943x_probe(struct device *dev, int irq)
         goto out1;
     }
 #endif
-    mutex_init(&s->mutex);
-    mutex_init(&s->mutex_bus_access);
-
     ret = ch943x_hw_test(s);
     if (ret < 0) {
         dev_err(s->dev, "Hardware transfer test Failed.\n");
@@ -508,7 +516,7 @@ static int ch943x_remove(struct device *dev)
     ch943x_gpio_remove(s);
 
 #ifdef USE_SERIAL_MODE
-    if (s->chip.chiptype == CHIP_CH9437F && IS_USE_SERIAL_MODE)
+    if (s->chip.chiptype == CHIP_CH9437F && IS_USE_SERIAL_MODE && s->fp)
         filp_close(s->fp, NULL);
 #endif
     mutex_destroy(&s->mutex);
@@ -522,9 +530,7 @@ static int ch943x_remove(struct device *dev)
 }
 
 static const struct of_device_id __maybe_unused ch943x_dt_ids[] = {
-    {
-     .compatible = "wch,ch943x",
-     },
+    { .compatible = "wch,ch943x", },
     {},
 };
 MODULE_DEVICE_TABLE(of, ch943x_dt_ids);
@@ -551,7 +557,11 @@ static int ch943x_spi_probe(struct spi_device *spi)
     }
 #else
     DRV_DEBUG(dev, "gpio_to_irq:%d\n", gpio_to_irq(GPIO_NUMBER));
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0))
+    ret = devm_gpio_request_one(dev, GPIO_NUMBER, GPIOF_IN, "gpioint");
+#else
     ret = devm_gpio_request(dev, GPIO_NUMBER, "gpioint");
+#endif
     if (ret) {
         dev_err(dev, "Failed request gpio:%d\n", GPIO_NUMBER);
         goto out;
@@ -590,7 +600,11 @@ static int ch943x_i2c_probe(struct i2c_client *i2c, const struct i2c_device_id *
         goto out;
     }
 #else
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0))
+    ret = devm_gpio_request_one(dev, GPIO_NUMBER, GPIOF_IN, "gpioint");
+#else
     ret = devm_gpio_request(dev, GPIO_NUMBER, "gpioint");
+#endif
     if (ret) {
         dev_err(dev, "Failed request gpio:%d\n", GPIO_NUMBER);
         goto out;
@@ -652,7 +666,11 @@ static int ch943x_platform_probe(struct platform_device *pdev)
      * Only after adding the above code can the following
      * devm_gpio_request function be executed.
      */
-    ret = devm_gpio_request(dev, gpio_number, "gpioint");
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0))
+    ret = devm_gpio_request_one(dev, GPIO_NUMBER, GPIOF_IN, "gpioint");
+#else
+    ret = devm_gpio_request(dev, GPIO_NUMBER, "gpioint");
+#endif
     if (ret) {
         dev_err(dev, "Failed request gpio:%d\n", GPIO_NUMBER);
         goto out;
@@ -670,7 +688,11 @@ static int ch943x_platform_probe(struct platform_device *pdev)
     }
 #else
     DRV_DEBUG(dev, "gpio_to_irq:%d\n", gpio_to_irq(GPIO_NUMBER));
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0))
+    ret = devm_gpio_request_one(dev, GPIO_NUMBER, GPIOF_IN, "gpioint");
+#else
     ret = devm_gpio_request(dev, GPIO_NUMBER, "gpioint");
+#endif
     if (ret) {
         dev_err(dev, "gpio request\n");
         goto out;
@@ -720,10 +742,17 @@ static int ch943x_i2c_remove(struct i2c_client *client)
 #endif
 }
 #elif defined(USE_SERIAL_MODE)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
+static void ch943x_platform_remove(struct platform_device *pdev)
+#else
 static int ch943x_platform_remove(struct platform_device *pdev)
+#endif
 {
     ch943x_remove(&pdev->dev);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0))
+#else
     return 0;
+#endif
 }
 #endif
 
@@ -760,10 +789,10 @@ MODULE_ALIAS("spi:ch943x");
 #elif defined(USE_I2C_MODE)
 static struct i2c_driver ch943x_i2c_driver = {
     .driver = {
-       .name = "ch943x",
-       .owner = THIS_MODULE,
-       .of_match_table = of_match_ptr(ch943x_dt_ids),
-       .pm = &ch943x_pm_ops,
+        .name = "ch943x",
+        .owner = THIS_MODULE,
+        .of_match_table = of_match_ptr(ch943x_dt_ids),
+        .pm = &ch943x_pm_ops,
     },
     .probe = ch943x_i2c_probe,
     .remove = ch943x_i2c_remove,
