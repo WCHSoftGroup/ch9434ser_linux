@@ -400,6 +400,9 @@ static int ch943x_stop(struct net_device *ndev)
     ch943x_hw_sleep(s);
     priv->can.state = CAN_STATE_STOPPED;
     atomic_set(&s->priv->can_isopen, 0);
+
+    ch943x_iofunc_set(s, CH943X_IO_DEF_W_EN, CH9434D_DEF_CAN_ADD, 0);
+
     return 0;
 }
 
@@ -493,6 +496,8 @@ static int ch943x_open(struct net_device *ndev)
 
     DRV_DEBUG(s->dev, "%s\n", __func__);
 
+    ch943x_iofunc_set(s, CH943X_IO_DEF_W_EN, CH9434D_DEF_CAN_ADD, 1);
+
     ret = open_candev(ndev);
     if (ret < 0) {
         dev_err(s->dev, "unable to set initial baudrate!\n");
@@ -519,7 +524,7 @@ static const struct net_device_ops ch943x_netdev_ops = {
     .ndo_open = ch943x_open,
     .ndo_stop = ch943x_stop,
     .ndo_start_xmit = ch943x_start_xmit,
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 15, 0))
+#if ((LINUX_VERSION_CODE >= KERNEL_VERSION(3, 15, 0)) && (LINUX_VERSION_CODE <= KERNEL_VERSION(6, 18, 0)))
     .ndo_change_mtu = can_change_mtu,
 #endif
 };
@@ -817,7 +822,7 @@ static void ch943x_can_err(struct ch943x *s, u32 fifo0_state, u32 fifo1_state, u
     s->priv->can.state = new_state;
 
     /* can_bus_off() already frees/consumes the skb — we must not touch it after */
-    if (!bus_off) {
+    if (!skb) {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0))
         netif_rx(skb);
 #else

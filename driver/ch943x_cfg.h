@@ -22,6 +22,12 @@
 #define USE_SPI_MODE /* USE_SPI_MODE/USE_I2C_MODE/USE_SERIAL_MODE */
 
 /**
+ * CH9434M does not provide a version register, so the chip type must be
+ * statically specified.
+ */
+// #define USE_CHIP_CH9434M
+
+/**
  * If multiple CH943X chips are used,
  * the MULTI_CHIP_MODE macro needs to be defined.
  * However, if using a single chip, there is no need to define it.
@@ -34,7 +40,7 @@
  * then the CTRLUART_PATH macro and CTRLUART_BAUD macro need to be defined
  * to declare the absolute path and baud rate of the control serial port.
  */
-#define CTRLUART_PATH "/dev/ttyS3"
+#define CTRLUART_PATH "/dev/ttyS0"
 #define CTRLUART_BAUD 4000000
 #endif
 
@@ -43,7 +49,7 @@
  * macro to indicate whether the chip uses an external clock or an internal clock.
  * Only one of these options can be selected.
  */
-#define INTERNAL_CLOCK /* INTERNAL_CLOCK/EXTERN_CLOCK */
+#define EXTERN_CLOCK /* INTERNAL_CLOCK/EXTERN_CLOCK */
 
 /**
  * When using RS485 serial port communication,
