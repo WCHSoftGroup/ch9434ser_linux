@@ -1142,6 +1142,7 @@ static int ch43x_probe(struct spi_device *spi, struct ch43x_devtype *devtype, in
     ret = uart_register_driver(&s->uart);
     if (ret < 0) {
         dev_err(dev, "Registering UART driver failed\n");
+        ch43x_release_minor(s);
         return -EBUSY;
     }
 

@@ -121,6 +121,14 @@ stty -F /dev/ttyS3 1000000 raw -echo -echoe -echok -echoctl -echoke
 #define CH9434D_CAN_ON
 ```
 
+#### 2.1.7 配置CH9434M芯片
+
+由于CH9434M芯片没有版本寄存器, 所以需要在`ch943x_cfg.h`文件中指定该芯片型号
+
+```
+#define USE_CHIP_CH9434M
+```
+
 ---
 
 ### 2.2 编译驱动程序
@@ -135,7 +143,7 @@ export  ARCH  CROSS_COMPILE
 
 DRIVERNAME := ch943x-module
 obj-m := $(DRIVERNAME).o
-$(DRIVERNAME)-y := ch943x_core.o ch943x_comm.o ch943x_uart.o ch943x_can.o
+$(DRIVERNAME)-y := ch943x_core.o ch943x_comm.o ch943x_uart.o ch943x_can.o ch943x_gpio.o
 
 all:
 	$(MAKE) EXTRA_CFLAGS=-fno-pic -C $(KERNEL_DIR) M=$(CURDIR) modules
@@ -192,16 +200,6 @@ I2C接口dts示例:
 **注意**: 需要在dts文件中指定CH943X芯片所在的总线类型(SPI/I2C)、片选IO、时钟频率、中断IO等。不同SOC平台的dts语法、节点命名方式等可能有差异, 应以实际为准, 或参考SOC平台的SDK资料。
 
 > **DTS 是什么?** DTS (Device Tree Source) 是 Linux 系统中用于描述硬件拓扑的配置文件。驱动通过读取 DTS 中的 `compatible = "wch,ch943x"` 来匹配设备。如果你不熟悉 DTS, 可先参考芯片厂商提供的 BSP/SDK 中已有的 SPI/I2C 设备节点写法。
-
-串口(SERIAL)接口模式无需 DTS 配置, 但需要通过 `platform_device` 注册设备, 示例:
-
-```c
-/* 在板级文件中注册 platform_device, 以 CH9437F 串口模式为例 */
-static struct platform_device ch943x_device = {
-    .name = "ch943x",
-    .id = 0,              /* 多芯片时用于区分不同芯片 */
-};
-```
 
 ### 2.4 加载驱动
 

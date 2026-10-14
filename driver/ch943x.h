@@ -48,7 +48,7 @@
 
 #define DRIVER_AUTHOR   "WCH"
 #define DRIVER_DESC     "SPI/I2C/UART to SERIAL/CAN/GPIO driver for CH9434/CH9438/CH9437/CH9432, etc"
-#define VERSION_DESC    "V1.7 On 2026.07"
+#define VERSION_DESC    "V1.7 On 2026.09"
 
 extern int drv_debug_enable;
 #define DRV_DEBUG(dev, format, ...)               \
@@ -242,6 +242,12 @@ extern const int ch943x_tnow_enable[8];
 #define CH943X_EXCLK_ENABLE 0
 #endif
 
+#if defined(USE_CHIP_CH9434M)
+#define IS_USE_CHIP_CH9434M 1
+#else
+#define IS_USE_CHIP_CH9434M 0
+#endif
+
 /* -----------------------------------------------------------------------------
  *                         CH943X UART register definitions
  * -----------------------------------------------------------------------------
@@ -368,6 +374,7 @@ extern const int ch943x_tnow_enable[8];
 #define CH943X_TXFIFO_SIZE (1536)
 #define CH943X_RXFIFO_SIZE (2048)
 #define CH943X_CMD_DELAY 3
+#define LOCAL_BUF_SIZE 4096
 
 #ifdef USE_SPI_MODE
 #define CAN_TX_CONTMODE
@@ -791,7 +798,7 @@ extern int ch943x_ctrl_tty_read(struct ch943x *s, u32 n_rx, void *rxbuf);
 
 extern int ch9437_serialmode_fifo_read(struct ch943x *s, u8 cmd, u32 n_rx, u8 *rxbuf);
 extern int ch9437_serialmode_fifo_write(struct ch943x *s, u8 cmd, u32 n_tx, u8 *txbuf);
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0))
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
 extern int ch943x_ctrluart_setopt(struct ch943x *s);
 #endif
 #endif

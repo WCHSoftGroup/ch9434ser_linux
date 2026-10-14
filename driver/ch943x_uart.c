@@ -87,12 +87,12 @@ static int ch943x_set_baud(struct uart_port *port, int baud)
         dll = (u8)(divider_value & 0xFF);
         dlh = (u8)((divider_value >> 8) & 0xFF);
     } else {
-        integer_divider = ((u64)25 * clk);            /* Compute: (clk * 25) / (4 * baud_rate) */
-        do_div(integer_divider, 4 * baud);            /* (clk * 25) / (4 * baud_rate) == (clk/(16*baud)) * 100 */
-        divider_value = (integer_divider / 100) << 4; /* Extract integer part: upper 12 bits for integer, lower 4 bits for fraction */
-        fractional_divider = integer_divider - (100 * (divider_value >> 4));  /* Compute fractional part */
-        fractional_divider = DIV_ROUND_CLOSEST(fractional_divider * 16, 100); /* Compute fractional divider and round */
-        divider_value |= (fractional_divider & 0x0F);                         /* Merge integer and fractional parts */
+        integer_divider = ((u64)25 * clk); /* Compute: (clk * 25) / (4 * baud_rate) */
+        do_div(integer_divider, 4 * baud); /* (clk * 25) / (4 * baud_rate) == (clk/(16*baud)) * 100 */
+        fractional_divider = do_div(integer_divider, 100);
+        divider_value = ((u32)integer_divider) << 4;
+        fractional_divider = DIV_ROUND_CLOSEST(fractional_divider * 16, 100);
+        divider_value |= (fractional_divider & 0x0F);
         /* Carry adjustment */
         if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F)) {
             if (fractional_divider & 0x10) {
@@ -223,8 +223,16 @@ static void ch943x_handle_tx(struct uart_port *port)
 {
     struct ch943x *s = dev_get_drvdata(port->dev);
     struct ch943x_one *one = to_ch943x_one(port, port);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
+    struct tty_port *tport = &port->state->port;
+#ifdef USE_SPI_MODE
+    int i;
+#endif
+#else
     struct circ_buf *xmit;
-    u32 txlen, to_send, i;
+    int i;
+#endif
+    u32 txlen, to_send;
     u8 cmd;
     int ret;
 
@@ -232,7 +240,10 @@ static void ch943x_handle_tx(struct uart_port *port)
 
     if (!port->state)
         return;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
+#else
     xmit = &port->state->xmit;
+#endif
 
     /* xon/xoff char */
     if (unlikely(port->x_char)) {
@@ -242,27 +253,39 @@ static void ch943x_handle_tx(struct uart_port *port)
         return;
     }
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
+    if (kfifo_is_empty(&tport->xmit_fifo) || uart_tx_stopped(port)) {
+#else
     if (uart_circ_empty(xmit) || uart_tx_stopped(port)) {
+#endif
         DRV_DEBUG(s->dev, "u%d has no data or has stop send\n", port->line);
         ch943x_port_update(port, CH943X_IER_REG, CH943X_IER_THRI_BIT, 0);
         return;
     }
 
     /* Get length of data pending in circular buffer */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
+    to_send = kfifo_len(&tport->xmit_fifo);
+#else
     to_send = uart_circ_chars_pending(xmit);
+#endif
+
     if (likely(to_send)) {
         /* Limit to size of TX FIFO */
         txlen = CH943X_TXFIFO_SIZE;
-
         to_send = (to_send > txlen) ? txlen : to_send;
         /* Add data to send */
         port->icount.tx += to_send;
 
         /* Convert to linear buffer */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
+        to_send = kfifo_out(&tport->xmit_fifo, one->txbuf, to_send);
+#else
         for (i = 0; i < to_send; ++i) {
             one->txbuf[i] = xmit->buf[xmit->tail];
             xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
         }
+#endif
 
         if ((s->chip.chiptype == CHIP_CH9438F) || (s->chip.chiptype == CHIP_CH9437F))
             cmd = (0x80 | (CH943X_THR_REG + port->line * 8));
@@ -284,7 +307,7 @@ static void ch943x_handle_tx(struct uart_port *port)
                     return;
             } else {
 #ifdef USE_SERIAL_MODE
-                ch9437_serialmode_fifo_write(s, cmd, to_send, one->txbuf);
+                ret = ch9437_serialmode_fifo_write(s, cmd, to_send, one->txbuf);
                 if (ret < 0) {
                     return;
                 }
@@ -312,8 +335,13 @@ static void ch943x_handle_tx(struct uart_port *port)
         }
     }
 
-    if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
+    if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS) {
+#else
+    if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS) {
+#endif
         uart_write_wakeup(port);
+    }
 }
 
 void ch943x_port_irq_bulkmode(struct ch943x *s)
@@ -438,7 +466,7 @@ void ch943x_port_irq(struct ch943x *s, int portno)
             dev_info(port->dev, "%s u%d rxlen:%d iir:%02x lsr:%02x", __func__, port->line, rxlen, iir, lsr);
             if (s->chip.chiptype == CHIP_CH9434A) {
                 /**
-                 * Sometimes interrupt but no data in fifo, 
+                 * Sometimes interrupt but no data in fifo,
                  * cause by wrong fifo cnt after reset, need to reset fifo to clear wrong cnt
                  */
                 p->err_times++;

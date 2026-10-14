@@ -586,7 +586,11 @@ static int ch943x_gpio_get(struct gpio_chip *gc, unsigned int offset)
     return ret;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+static int ch943x_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+#else
 static void ch943x_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+#endif
 {
     struct ch943x *s = gpiochip_get_data(gc);
     u8 val;
@@ -601,11 +605,11 @@ static void ch943x_gpio_set(struct gpio_chip *gc, unsigned int offset, int value
         if (value) {
             ret = ch943x_reg_update(s, CH943X_GPIOVAL_REG + (offset / 8), bit, bit);
             if (ret < 0)
-                return;
+                goto exit;
         } else {
             ret = ch943x_reg_update(s, CH943X_GPIOVAL_REG + (offset / 8), bit, 0);
             if (ret < 0)
-                return;
+                goto exit;
         }
         break;
     case CHIP_CH9434D:
@@ -616,16 +620,22 @@ static void ch943x_gpio_set(struct gpio_chip *gc, unsigned int offset, int value
         if (value) {
             ret = ch943x_reg_write(s, CH9434_GPIO_SET_0 + (offset / 8), 1, &val);
             if (ret < 0)
-                return;
+                goto exit;
         } else {
             ret = ch943x_reg_write(s, CH9434_GPIO_RESET_0 + (offset / 8), 1, &val);
             if (ret < 0)
-                return;
+                goto exit;
         }
         break;
     default:
         break;
     }
+exit:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+    return ret;
+#else
+    return;
+#endif
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)

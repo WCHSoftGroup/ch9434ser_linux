@@ -1,5 +1,5 @@
-#ifndef _LIB_CH943X_H
-#define _LIB_CH943X_H
+#ifndef _CH943X_GPIO_LIB_H
+#define _CH943X_GPIO_LIB_H
 
 /* error code */
 #define ERROR_CODE1 1 /* Control interface transfer error */
