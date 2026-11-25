@@ -819,6 +819,9 @@ static void ch943x_shutdown(struct uart_port *port)
     flush_signals(current);
 #endif
 
+    cancel_work_sync(&one->stop_rx_work);
+    cancel_work_sync(&one->stop_tx_work);
+    cancel_work_sync(&one->tx_work);
     /* Disable all interrupts */
     ch943x_port_write(port, CH943X_IER_REG, 0);
     if ((s->chip.chiptype == CHIP_CH9434D) || (s->chip.chiptype == CHIP_CH9432D) ||
